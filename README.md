@@ -25,7 +25,7 @@ This project depends on the wasmtime and streamdown libraries.
 ## Third-party assets
 
 ### streamdown
-The `DeepSeekAPI/streamdown/` folder contains code from [Streamdown](https://github.com/day50-dev/Streamdown) and some of our modifications. All code in that directory, whether original or modified, remains under the [original MIT license](DeepSeekAPI/streamdown/LICENSE.MIT).
+The `DeepSeekAPI/streamdown/` folder contains code from [Streamdown](https://github.com/day50-dev/Streamdown) and some of our modifications. All code in that directory, whether original or modified, remains under the [MIT license](DeepSeekAPI/streamdown/LICENSE.MIT).
 
 **Files:**
 - `DeepSeekAPI/plugins/latex.py` - Original Streamdown helper code for latex
@@ -59,4 +59,4 @@ See the [LICENSE](LICENSE) file for the full text.
 
 The streamdown module is licensed under the MIT License.
 
-See the [LICENSE.MIT](LICENSE.MIT) file for the full text.
+See the [LICENSE.MIT](DeepSeekAPI/streamdown/LICENSE.MIT) file for the full text.
