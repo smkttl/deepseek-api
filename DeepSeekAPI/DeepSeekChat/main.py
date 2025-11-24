@@ -195,7 +195,7 @@ class DeepSeekChat:
                                 parse_output(data['v'],line)
                             elif tp=='status':
                                 if printing:
-                                    send_to_sd('\n-----\n'+data['v'])
+                                    send_to_sd('\n\n-----\n'+data['v'])
                             elif tp=='accumulated_token_usage':
                                 tokencount=data['v']
                             elif tp=='elapsed_secs':
@@ -209,7 +209,7 @@ class DeepSeekChat:
                         elif 'type' in data and data['type']:
                             if generate_mode!=data['type']:
                                 if printing:
-                                    send_to_sd(f"\n-----\nSTART {data['type']}\n")
+                                    send_to_sd(f"\n\n-----\nSTART {data['type']}\n")
                                 generate_mode=data['type']
                             if 'content' in data:
                                 parse_output(data['content'],line)
@@ -241,7 +241,7 @@ class DeepSeekChat:
                         else:
                             raise Exception(f"Unexpected response consisting of {type(line)}")
                 if printing:
-                    print(f"Finished generating... Thinking time: {thinktime} Total tokens: {tokencount} {'Title: '+title if len(title)>0 else ''}")
+                    print(f"\nFinished generating... Thinking time: {thinktime} Total tokens: {tokencount} {'Title: '+title if len(title)>0 else ''}")
                 ret={}
                 if thinking_enabled:
                     ret["thinktime"]=thinktime
