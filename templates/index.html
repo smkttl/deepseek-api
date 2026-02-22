@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DeepSeek API – Chat</title>
+  <!-- marked.js for Markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- highlight.js for code syntax highlighting -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/core.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:         #0f1117;
+      --surface:    #1a1d27;
+      --border:     #2d3148;
+      --accent:     #4f6ef7;
+      --accent-hover:#6b84f9;
+      --text:       #e2e8f0;
+      --muted:      #8892a4;
+      --user-bg:    #1e2235;
+      --ai-bg:      #141726;
+      --think-bg:   #12182b;
+      --think-border:#3b4a7a;
+      --danger:     #e05b5b;
+      --radius:     10px;
+      --font:       'Segoe UI', system-ui, -apple-system, sans-serif;
+    }
+
+    html, body { height: 100%; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 15px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ─── Header ─────────────────────────────────────────── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 20px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .logo {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .logo svg { width: 26px; height: 26px; }
+
+    .header-actions { display: flex; gap: 10px; }
+
+    /* ─── Main layout ─────────────────────────────────────── */
+    .layout {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* ─── Sidebar ─────────────────────────────────────────── */
+    .sidebar {
+      width: 280px;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 20px;
+      gap: 16px;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+    .sidebar h2 {
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    label.field-label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    input[type="text"], input[type="password"], select {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      padding: 8px 10px;
+      font-size: 13px;
+      outline: none;
+      transition: border-color .2s;
+    }
+    input[type="text"]:focus, input[type="password"]:focus, select:focus {
+      border-color: var(--accent);
+    }
+    select option { background: var(--bg); }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 14px;
+    }
+    .toggle {
+      position: relative;
+      width: 38px;
+      height: 22px;
+    }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute;
+      inset: 0;
+      background: var(--border);
+      border-radius: 22px;
+      cursor: pointer;
+      transition: background .2s;
+    }
+    .slider::before {
+      content: '';
+      position: absolute;
+      width: 16px; height: 16px;
+      left: 3px; bottom: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform .2s;
+    }
+    .toggle input:checked + .slider { background: var(--accent); }
+    .toggle input:checked + .slider::before { transform: translateX(16px); }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px 14px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      border: none;
+      transition: background .2s, opacity .2s;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-secondary {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover { color: var(--text); border-color: var(--muted); }
+    .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+    .btn-danger:hover { background: var(--danger); color: #fff; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+    .sidebar .action-row { display: flex; gap: 8px; }
+    .sidebar .action-row .btn { flex: 1; }
+
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      display: inline-block;
+    }
+    .status-dot.ok { background: #4ade80; }
+
+    /* ─── Chat area ────────────────────────────────────────── */
+    .chat-wrapper {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .messages::-webkit-scrollbar { width: 6px; }
+    .messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+    /* ─── Message bubbles ─────────────────────────────────── */
+    .msg {
+      display: flex;
+      gap: 10px;
+      max-width: 820px;
+      width: 100%;
+      margin: 0 auto;
+    }
+    .msg.user { flex-direction: row-reverse; }
+
+    .avatar {
+      width: 34px; height: 34px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .avatar.user-av { background: var(--accent); color: #fff; }
+    .avatar.ai-av   { background: #2d3148; color: var(--accent); }
+
+    .bubble {
+      padding: 12px 16px;
+      border-radius: var(--radius);
+      line-height: 1.65;
+      max-width: calc(100% - 50px);
+      word-break: break-word;
+    }
+    .user .bubble {
+      background: var(--user-bg);
+      border: 1px solid var(--border);
+      border-top-right-radius: 3px;
+    }
+    .assistant .bubble {
+      background: var(--ai-bg);
+      border: 1px solid var(--border);
+      border-top-left-radius: 3px;
+    }
+
+    /* Thinking block */
+    .think-block {
+      background: var(--think-bg);
+      border: 1px solid var(--think-border);
+      border-radius: var(--radius);
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+    .think-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      cursor: pointer;
+      user-select: none;
+      background: rgba(79,110,247,.08);
+      font-size: 12px;
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .think-body {
+      padding: 10px 14px;
+      font-size: 13px;
+      color: var(--muted);
+      border-top: 1px solid var(--think-border);
+      display: none;
+    }
+    .think-body.open { display: block; }
+    .think-body p { margin: 4px 0; }
+
+    /* Markdown styles inside bubbles */
+    .bubble h1,.bubble h2,.bubble h3 { margin: 12px 0 6px; color: var(--text); }
+    .bubble p   { margin: 6px 0; }
+    .bubble ul, .bubble ol { padding-left: 20px; margin: 6px 0; }
+    .bubble li  { margin: 3px 0; }
+    .bubble code {
+      background: rgba(255,255,255,.07);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 13px;
+      font-family: 'Fira Code', 'Cascadia Code', monospace;
+    }
+    .bubble pre {
+      background: #0d1117;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      overflow-x: auto;
+      margin: 8px 0;
+    }
+    .bubble pre code { background: none; padding: 0; }
+    .bubble blockquote {
+      border-left: 3px solid var(--accent);
+      margin: 8px 0;
+      padding: 4px 12px;
+      color: var(--muted);
+    }
+    .bubble a { color: var(--accent); }
+    .bubble table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+    .bubble th, .bubble td {
+      border: 1px solid var(--border);
+      padding: 6px 10px;
+      text-align: left;
+    }
+    .bubble th { background: rgba(255,255,255,.04); }
+
+    /* Loading indicator */
+    .loading-dots span {
+      display: inline-block;
+      width: 6px; height: 6px;
+      background: var(--muted);
+      border-radius: 50%;
+      margin: 0 2px;
+      animation: bounce 1.2s infinite;
+    }
+    .loading-dots span:nth-child(2) { animation-delay: .2s; }
+    .loading-dots span:nth-child(3) { animation-delay: .4s; }
+    @keyframes bounce {
+      0%,80%,100% { transform: translateY(0); }
+      40%          { transform: translateY(-6px); }
+    }
+
+    /* Empty state */
+    .empty-state {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      color: var(--muted);
+      text-align: center;
+      padding: 40px;
+    }
+    .empty-state svg { width: 56px; height: 56px; opacity: .3; }
+    .empty-state h3 { font-size: 18px; color: var(--text); }
+    .empty-state p  { font-size: 14px; max-width: 340px; }
+
+    /* ─── Input area ──────────────────────────────────────── */
+    .input-area {
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      padding: 14px 20px;
+      flex-shrink: 0;
+    }
+    .input-row {
+      display: flex;
+      gap: 10px;
+      max-width: 820px;
+      margin: 0 auto;
+      align-items: flex-end;
+    }
+    textarea#userInput {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      padding: 10px 14px;
+      font-size: 14px;
+      font-family: var(--font);
+      resize: none;
+      outline: none;
+      min-height: 44px;
+      max-height: 180px;
+      line-height: 1.5;
+      transition: border-color .2s;
+    }
+    textarea#userInput:focus { border-color: var(--accent); }
+    textarea#userInput::placeholder { color: var(--muted); }
+
+    .send-btn {
+      width: 44px; height: 44px;
+      border-radius: var(--radius);
+      background: var(--accent);
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      flex-shrink: 0;
+      transition: background .2s;
+    }
+    .send-btn:hover { background: var(--accent-hover); }
+    .send-btn:disabled { opacity: .5; cursor: not-allowed; }
+    .send-btn svg { width: 18px; height: 18px; }
+
+    /* Toast notifications */
+    #toast {
+      position: fixed;
+      bottom: 24px; right: 24px;
+      background: #1e2235;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 16px;
+      font-size: 13px;
+      z-index: 999;
+      display: none;
+      max-width: 320px;
+    }
+    #toast.err { border-color: var(--danger); color: var(--danger); }
+
+    /* Responsive */
+    @media (max-width: 640px) {
+      .sidebar { display: none; }
+      .sidebar.open {
+        display: flex;
+        position: fixed;
+        inset: 56px 0 0 0;
+        width: 100%;
+        z-index: 100;
+        border-right: none;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══ Header ═══════════════════════════════════════════════════════════ -->
+<header>
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M8 12h8M12 8v8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+    DeepSeek API
+  </div>
+  <div class="header-actions">
+    <span id="statusIndicator" class="status-dot" title="未连接"></span>
+    <button class="btn btn-secondary" id="clearBtn" title="清空对话">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/>
+      </svg>
+      清空
+    </button>
+  </div>
+</header>
+
+<!-- ═══ Main Layout ═══════════════════════════════════════════════════════ -->
+<div class="layout">
+
+  <!-- Sidebar / Settings -->
+  <aside class="sidebar" id="sidebar">
+    <h2>设置</h2>
+
+    <div>
+      <label class="field-label" for="sessionId">DS Session ID</label>
+      <input type="password" id="sessionId" placeholder="粘贴 ds_session_id …" />
+    </div>
+
+    <div>
+      <label class="field-label" for="authToken">Authorization Token</label>
+      <input type="password" id="authToken" placeholder="粘贴 Bearer token …" />
+    </div>
+
+    <div>
+      <label class="field-label" for="modelSelect">模型</label>
+      <select id="modelSelect">
+        <option value="deepseek-chat">deepseek-chat</option>
+        <option value="deepseek-reasoner">deepseek-reasoner（思考模式）</option>
+      </select>
+    </div>
+
+    <div class="toggle-row">
+      <span>联网搜索</span>
+      <label class="toggle">
+        <input type="checkbox" id="searchToggle" />
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="action-row">
+      <button class="btn btn-primary" id="saveBtn">保存</button>
+      <button class="btn btn-danger"  id="resetBtn">重置</button>
+    </div>
+
+    <div style="font-size:12px; color:var(--muted); line-height:1.6;">
+      获取凭证：打开 <a href="https://chat.deepseek.com" target="_blank" style="color:var(--accent)">chat.deepseek.com</a>，
+      打开 DevTools → Application → Cookies，复制 <code>ds_session_id</code>；
+      在 Network 标签页中找到任意 API 请求，复制 <code>Authorization</code> 请求头的值（包含 Bearer 前缀）。
+    </div>
+  </aside>
+
+  <!-- Chat area -->
+  <div class="chat-wrapper">
+    <div class="messages" id="messages">
+      <div class="empty-state" id="emptyState">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+        </svg>
+        <h3>开始聊天</h3>
+        <p>在左侧填写凭证，然后在下方输入消息。</p>
+      </div>
+    </div>
+
+    <div class="input-area">
+      <div class="input-row">
+        <textarea id="userInput" rows="1" placeholder="输入消息… (Shift+Enter 换行，Enter 发送)"></textarea>
+        <button class="send-btn" id="sendBtn" title="发送">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<script>
+  // ── Initialise marked (CDN may be unavailable in some environments) ───
+  if (typeof marked !== 'undefined') {
+    marked.setOptions({
+      breaks: true,
+      gfm: true,
+      highlight: function(code, lang) {
+        if (lang && typeof hljs !== 'undefined' && hljs.getLanguage && hljs.getLanguage(lang)) {
+          try { return hljs.highlight(code, {language: lang}).value; } catch {}
+        }
+        return code;
+      }
+    });
+  } else {
+    // Minimal fallback renderer when marked.js CDN is unavailable
+    window.marked = {
+      parse: function(text) {
+        if (!text) return '';
+        return text
+          // Code blocks
+          .replace(/```[\w]*\n?([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
+          // Inline code
+          .replace(/`([^`]+)`/g, '<code>$1</code>')
+          // Bold
+          .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+          // Italic
+          .replace(/_(.+?)_/g, '<em>$1</em>')
+          // Links
+          .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>')
+          // Newlines to <br>
+          .replace(/\n/g, '<br>');
+      }
+    };
+  }
+
+  // ── State ─────────────────────────────────────────────────────────────
+  const STORAGE_KEY = 'dsapi_settings';
+  let sessionHistory = []; // [{role, content}]
+  let isLoading = false;
+  // A stable session id so the server can reuse the same DeepSeekChat instance
+  let clientSessionId = localStorage.getItem('dsapi_session_id') || crypto.randomUUID();
+  localStorage.setItem('dsapi_session_id', clientSessionId);
+
+  // ── DOM refs ──────────────────────────────────────────────────────────
+  const messagesEl  = document.getElementById('messages');
+  const emptyState  = document.getElementById('emptyState');
+  const userInput   = document.getElementById('userInput');
+  const sendBtn     = document.getElementById('sendBtn');
+  const clearBtn    = document.getElementById('clearBtn');
+  const saveBtn     = document.getElementById('saveBtn');
+  const resetBtn    = document.getElementById('resetBtn');
+  const sessionIdEl = document.getElementById('sessionId');
+  const authTokenEl = document.getElementById('authToken');
+  const modelSelect = document.getElementById('modelSelect');
+  const searchToggle= document.getElementById('searchToggle');
+  const statusDot   = document.getElementById('statusIndicator');
+  const toast       = document.getElementById('toast');
+
+  // ── Persist settings ──────────────────────────────────────────────────
+  function loadSettings() {
+    try {
+      const s = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      sessionIdEl.value  = s.sessionId  || '';
+      authTokenEl.value  = s.authToken  || '';
+      modelSelect.value  = s.model      || 'deepseek-chat';
+      searchToggle.checked = s.search   || false;
+      updateStatus();
+    } catch {}
+  }
+
+  function saveSettings() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      sessionId: sessionIdEl.value.trim(),
+      authToken: authTokenEl.value.trim(),
+      model:     modelSelect.value,
+      search:    searchToggle.checked,
+    }));
+    updateStatus();
+    showToast('设置已保存', false);
+  }
+
+  function resetSettings() {
+    localStorage.removeItem(STORAGE_KEY);
+    sessionIdEl.value = '';
+    authTokenEl.value = '';
+    modelSelect.value = 'deepseek-chat';
+    searchToggle.checked = false;
+    updateStatus();
+    showToast('设置已重置', false);
+  }
+
+  function updateStatus() {
+    const ok = sessionIdEl.value.trim() && authTokenEl.value.trim();
+    statusDot.className = 'status-dot' + (ok ? ' ok' : '');
+    statusDot.title = ok ? '凭证已配置' : '未配置凭证';
+  }
+
+  // ── Toast ─────────────────────────────────────────────────────────────
+  let toastTimer;
+  function showToast(msg, isErr = false) {
+    toast.textContent = msg;
+    toast.className = isErr ? 'err' : '';
+    toast.style.display = 'block';
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toast.style.display = 'none'; }, 3000);
+  }
+
+  // ── Textarea auto-resize ──────────────────────────────────────────────
+  userInput.addEventListener('input', () => {
+    userInput.style.height = 'auto';
+    userInput.style.height = Math.min(userInput.scrollHeight, 180) + 'px';
+  });
+
+  userInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (!isLoading) sendMessage();
+    }
+  });
+
+  // ── Render helpers ────────────────────────────────────────────────────
+  function renderMarkdown(text) {
+    return marked.parse(text || '');
+  }
+
+  function appendUserMessage(text) {
+    emptyState.style.display = 'none';
+    const div = document.createElement('div');
+    div.className = 'msg user';
+    div.innerHTML = `
+      <div class="avatar user-av">你</div>
+      <div class="bubble">${escapeHtml(text).replace(/\n/g,'<br>')}</div>
+    `;
+    messagesEl.appendChild(div);
+    scrollBottom();
+  }
+
+  function appendAiMessage(text) {
+    const div = document.createElement('div');
+    div.className = 'msg assistant';
+    div.id = 'ai-' + Date.now();
+    div.innerHTML = `
+      <div class="avatar ai-av">AI</div>
+      <div class="bubble" id="bubble-${div.id}"><div class="loading-dots"><span></span><span></span><span></span></div></div>
+    `;
+    messagesEl.appendChild(div);
+    scrollBottom();
+    return div.id;
+  }
+
+  function updateAiMessage(id, rawText) {
+    const bubble = document.getElementById('bubble-' + id);
+    if (!bubble) return;
+
+    // Separate <think>…</think> blocks from the main response
+    const thinkRegex = /<think>([\s\S]*?)<\/think>/g;
+    let thinkContent = '';
+    let responseText = rawText;
+    let match;
+    while ((match = thinkRegex.exec(rawText)) !== null) {
+      thinkContent += match[1];
+    }
+    responseText = rawText.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+
+    let html = '';
+    if (thinkContent.trim()) {
+      const uid = 'think-' + Date.now();
+      html += `
+        <div class="think-block">
+          <div class="think-header" onclick="toggleThink('${uid}')">
+            <span>💭 思考过程</span>
+            <span id="arrow-${uid}">▶</span>
+          </div>
+          <div class="think-body" id="${uid}">${renderMarkdown(thinkContent)}</div>
+        </div>
+      `;
+    }
+    html += renderMarkdown(responseText);
+    bubble.innerHTML = html;
+    scrollBottom();
+  }
+
+  function toggleThink(uid) {
+    const body  = document.getElementById(uid);
+    const arrow = document.getElementById('arrow-' + uid);
+    body.classList.toggle('open');
+    if (arrow) arrow.textContent = body.classList.contains('open') ? '▼' : '▶';
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function scrollBottom() {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  // ── Send message ──────────────────────────────────────────────────────
+  async function sendMessage() {
+    const text = userInput.value.trim();
+    if (!text) return;
+
+    const settings = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    if (!settings.sessionId || !settings.authToken) {
+      showToast('请先在左侧填写并保存凭证', true);
+      return;
+    }
+
+    // Append to history
+    sessionHistory.push({ role: 'user', content: text });
+    appendUserMessage(text);
+    userInput.value = '';
+    userInput.style.height = 'auto';
+
+    // Lock UI
+    isLoading = true;
+    sendBtn.disabled = true;
+
+    const aiMsgId = appendAiMessage('');
+
+    try {
+      const authHeader = `Bearer ${settings.sessionId}:${settings.authToken}`;
+      const body = JSON.stringify({
+        model: settings.model || 'deepseek-chat',
+        messages: sessionHistory,
+        stream: true,
+        search_enabled: settings.search || false,
+        session_id: clientSessionId,
+      });
+
+      const resp = await fetch('/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': authHeader,
+        },
+        body,
+      });
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        const msg = (err.error && err.error.message) || `HTTP ${resp.status}`;
+        updateAiMessage(aiMsgId, `⚠️ 错误：${msg}`);
+        sessionHistory.pop(); // remove last user message
+        showToast(msg, true);
+        return;
+      }
+
+      // Read SSE stream
+      const reader  = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = '';
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // keep incomplete line
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const payload = line.slice(6).trim();
+          if (payload === '[DONE]') break;
+          try {
+            const chunk = JSON.parse(payload);
+            if (chunk.error) {
+              accumulated += `\n⚠️ ${chunk.error}`;
+            } else {
+              const delta = chunk.choices?.[0]?.delta?.content;
+              if (delta) accumulated += delta;
+            }
+            updateAiMessage(aiMsgId, accumulated);
+          } catch {}
+        }
+      }
+
+      // Store final AI message in history
+      sessionHistory.push({ role: 'assistant', content: accumulated });
+
+    } catch (err) {
+      updateAiMessage(aiMsgId, `⚠️ 请求失败：${err.message}`);
+      sessionHistory.pop();
+      showToast(err.message, true);
+    } finally {
+      isLoading = false;
+      sendBtn.disabled = false;
+      userInput.focus();
+    }
+  }
+
+  // ── Clear conversation ────────────────────────────────────────────────
+  function clearConversation() {
+    sessionHistory = [];
+    // Generate new server-side session id so the server starts a fresh DeepSeek session
+    clientSessionId = crypto.randomUUID();
+    localStorage.setItem('dsapi_session_id', clientSessionId);
+    messagesEl.innerHTML = '';
+    messagesEl.appendChild(emptyState);
+    emptyState.style.display = '';
+    showToast('对话已清空', false);
+  }
+
+  // ── Event listeners ───────────────────────────────────────────────────
+  saveBtn.addEventListener('click', saveSettings);
+  resetBtn.addEventListener('click', resetSettings);
+  clearBtn.addEventListener('click', clearConversation);
+  sendBtn.addEventListener('click', () => { if (!isLoading) sendMessage(); });
+  [sessionIdEl, authTokenEl].forEach(el => el.addEventListener('input', updateStatus));
+
+  // ── Boot ──────────────────────────────────────────────────────────────
+  loadSettings();
+</script>
+</body>
+</html>

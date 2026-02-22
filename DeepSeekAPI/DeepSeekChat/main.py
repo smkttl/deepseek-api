@@ -242,6 +242,8 @@ class DeepSeekChat:
                             raise Exception(f"Unexpected response consisting of {type(line)}")
                 if printing:
                     print(f"\nFinished generating... Thinking time: {thinktime} Total tokens: {tokencount} {'Title: '+title if len(title)>0 else ''}")
+                if msgid:
+                    self.parent_message_id=msgid
                 ret={}
                 if thinking_enabled:
                     ret["thinktime"]=thinktime

@@ -3,3 +3,6 @@ debug_info
 twiddle
 deepseek-wasm/
 tokens
+__pycache__/
+*.pyc
+*.pyo

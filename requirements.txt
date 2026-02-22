@@ -5,3 +5,4 @@ appdirs
 term-image
 wcwidth
 toml
+flask
