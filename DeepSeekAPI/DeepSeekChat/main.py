@@ -202,7 +202,7 @@ class DeepSeekChat:
                                 thinktime=data['v']
                             elif tp=='results' and generate_mode=='SEARCH':
                                 parse_output(data['v'],line)
-                            elif tp=='has_pending_fragment' or tp=='conversation_mode':
+                            elif tp=='has_pending_fragment' or tp=='conversation_mode' or tp=='quasi_status':
                                 pass
                             else:
                                 raise Exception(f"Unknown 'p' field: {tp}\nData: {line}")
