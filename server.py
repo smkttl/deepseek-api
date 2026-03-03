@@ -7,6 +7,9 @@ DeepSeek API Server - OpenAI-compatible server for DeepSeek
 
 import os
 import json
+import time
+import sys
+from io import StringIO
 from flask import Flask, request, jsonify, Response, stream_with_context
 from DeepSeekAPI import DeepSeekChat, DeepSeekChatIOMethods
 
@@ -27,68 +30,94 @@ def get_tokens():
 
 DS_SESSION_ID, AUTHORIZATION_TOKEN = get_tokens()
 
-def build_messages(messages):
-    """Convert OpenAI-style messages to DeepSeek format"""
-    result = []
-    for msg in messages:
-        if msg["role"] == "system":
-            result.append({"role": "system", "content": msg["content"]})
-        elif msg["role"] == "user":
-            result.append({"role": "user", "content": msg["content"]})
-        elif msg["role"] == "assistant":
-            result.append({"role": "assistant", "content": msg["content"]})
-    return result
+def extract_content(result):
+    """Extract plain text from DeepSeek response"""
+    if isinstance(result, dict):
+        if result.get('ok'):
+            data = result.get('content', {})
+            if isinstance(data, dict):
+                return data.get('response', str(result))
+        return str(result)
+    return str(result) if result else ""
 
 def chat_non_streaming(messages, thinking_enabled=True):
     """Non-streaming chat"""
     user_message = messages[-1]["content"] if messages else ""
-    chat = DeepSeekChat(DS_SESSION_ID, AUTHORIZATION_TOKEN)
-    result = chat.send_message(user_message, printing=False, thinking_enabled=thinking_enabled, search_enabled=False)
-    return result
+    
+    # Redirect stdout to capture output
+    old_stdout = sys.stdout
+    sys.stdout = mystdout = StringIO()
+    
+    try:
+        chat = DeepSeekChat(DS_SESSION_ID, AUTHORIZATION_TOKEN)
+        chat.send_message(user_message, printing=True, thinking_enabled=thinking_enabled, search_enabled=False)
+    finally:
+        sys.stdout = old_stdout
+    
+    output = mystdout.getvalue()
+    
+    # Parse output to extract response
+    in_response = False
+    response_text = ""
+    
+    for line in output.split('\n'):
+        if 'START RESPONSE' in line:
+            in_response = True
+            continue
+        elif 'FINISHED' in line:
+            in_response = False
+            break
+        elif 'START THINK' in line:
+            in_response = False
+            continue
+        
+        if in_response and line.strip():
+            response_text += line + '\n'
+    
+    return response_text.strip() if response_text else output
 
 def chat_streaming(messages, thinking_enabled=True):
     """Streaming chat using SSE"""
     user_message = messages[-1]["content"] if messages else ""
-    chat = DeepSeekChat(DS_SESSION_ID, AUTHORIZATION_TOKEN)
     
-    def generate():
-        import subprocess
-        import sys
-        import io
-        
-        # Use subprocess to capture stdout
-        proc = subprocess.Popen(
-            [
-                sys.executable, '-c',
-                f"from DeepSeekAPI import DeepSeekChat; "
-                f"DeepSeekChat({repr(DS_SESSION_ID)}, {repr(AUTHORIZATION_TOKEN)}).send_message("
-                f"{repr(user_message)}, True, {str(thinking_enabled).lower()}, False)"
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=False
-        )
-        
-        buffer = ""
-        while True:
-            char = proc.stdout.read(1)
-            if not char:
-                break
-            char = char.decode('utf-8', errors='replace')
-            buffer += char
-            
-            # Parse complete messages from buffer
-            while '\n' in buffer:
-                line, buffer = buffer.split('\n', 1)
-                if line.startswith('data:'):
-                    data = line[5:].strip()
-                    if data:
-                        yield f"data: {json.dumps({'choices': [{'delta': {'content': data}}]})}\n\n"
-        
-        proc.wait()
-        yield "data: [DONE]\n\n"
+    # Redirect stdout to capture output
+    old_stdout = sys.stdout
+    sys.stdout = mystdout = StringIO()
     
-    return generate()
+    try:
+        chat = DeepSeekChat(DS_SESSION_ID, AUTHORIZATION_TOKEN)
+        chat.send_message(user_message, printing=True, thinking_enabled=thinking_enabled, search_enabled=False)
+    finally:
+        sys.stdout = old_stdout
+    
+    output = mystdout.getvalue()
+    
+    # Parse and yield tokens
+    in_thinking = False
+    in_response = False
+    
+    for line in output.split('\n'):
+        if 'START THINK' in line:
+            in_thinking = True
+            in_response = False
+            continue
+        elif 'START RESPONSE' in line:
+            in_thinking = False
+            in_response = True
+            continue
+        elif 'FINISHED' in line:
+            in_response = False
+            break
+        
+        if in_thinking:
+            continue  # Skip thinking in streaming for now
+        elif in_response:
+            if line.strip():
+                content_line = line + '\n'
+                data_str = json.dumps({'choices': [{'delta': {'content': content_line}}]})
+                yield "data: " + data_str + "\n\n"
+    
+    yield "data: [DONE]\n\n"
 
 @app.route("/v1/chat/completions", methods=["POST"])
 def chat_completions():
@@ -114,22 +143,22 @@ def chat_completions():
         result = chat_non_streaming(messages, thinking_enabled)
         
         return jsonify({
-            "id": f"chatcmpl-{hash(str(messages))}",
+            "id": f"chatcmpl-{int(time.time())}",
             "object": "chat.completion",
-            "created": int(__import__("time").time()),
+            "created": int(time.time()),
             "model": model,
             "choices": [{
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": result or ""
+                    "content": result
                 },
                 "finish_reason": "stop"
             }],
             "usage": {
                 "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0
+                "completion_tokens": len(result.split()) if result else 0,
+                "total_tokens": len(result.split()) if result else 0
             }
         })
 
