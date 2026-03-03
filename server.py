@@ -30,15 +30,13 @@ def get_tokens():
 
 DS_SESSION_ID, AUTHORIZATION_TOKEN = get_tokens()
 
-def extract_content(result):
-    """Extract plain text from DeepSeek response"""
-    if isinstance(result, dict):
-        if result.get('ok'):
-            data = result.get('content', {})
-            if isinstance(data, dict):
-                return data.get('response', str(result))
-        return str(result)
-    return str(result) if result else ""
+def get_thinking_enabled(model: str) -> bool:
+    """Determine if thinking is enabled based on model name"""
+    model_lower = model.lower()
+    # deepseek-r1 enables thinking, deepseek-v3 disables it
+    if 'r1' in model_lower or 'reasoning' in model_lower:
+        return True
+    return False
 
 def chat_non_streaming(messages, thinking_enabled=True):
     """Non-streaming chat"""
@@ -125,10 +123,12 @@ def chat_completions():
     
     messages = data.get("messages", [])
     stream = data.get("stream", False)
-    thinking_enabled = not data.get("disable_thinking", False)
     
-    # Handle model field (for compatibility)
+    # Determine model - default to deepseek-chat
     model = data.get("model", "deepseek-chat")
+    
+    # Determine thinking enabled based on model name
+    thinking_enabled = get_thinking_enabled(model)
     
     if stream:
         return Response(
@@ -166,12 +166,22 @@ def chat_completions():
 def list_models():
     return jsonify({
         "object": "list",
-        "data": [{
-            "id": "deepseek-chat",
-            "object": "model",
-            "created": 1704067200,
-            "owned_by": "deepseek"
-        }]
+        "data": [
+            {
+                "id": "deepseek-v3",
+                "object": "model",
+                "created": 1704067200,
+                "owned_by": "deepseek",
+                "description": "DeepSeek V3 - Fast responses without extended thinking"
+            },
+            {
+                "id": "deepseek-r1",
+                "object": "model",
+                "created": 1704067200,
+                "owned_by": "deepseek",
+                "description": "DeepSeek R1 - Reasoning model with extended thinking"
+            }
+        ]
     })
 
 @app.route("/health", methods=["GET"])
