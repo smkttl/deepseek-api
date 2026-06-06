@@ -12,11 +12,48 @@ import time
 import sys
 import queue
 import threading
+import hashlib
 from io import StringIO
 from flask import Flask, request, jsonify, Response, stream_with_context, render_template
 from DeepSeekAPI import DeepSeekChat
 
 app = Flask(__name__)
+
+# Thread-safe multi-turn session cache
+session_cache = {}
+cache_lock = threading.Lock()
+
+def get_messages_hash(messages):
+    normalized = []
+    for m in messages:
+        normalized.append({
+            "role": m.get("role"),
+            "content": m.get("content"),
+            "tool_calls": m.get("tool_calls")
+        })
+    return hashlib.sha256(json.dumps(normalized, sort_keys=True).encode('utf-8')).hexdigest()
+
+def lookup_session(messages):
+    if not messages or len(messages) <= 1:
+        return None, None
+    prefix = messages[:-1]
+    prefix_hash = get_messages_hash(prefix)
+    with cache_lock:
+        return session_cache.get(prefix_hash, (None, None))
+
+def save_session(messages, response_content, chat_session_id, parent_message_id, tool_calls=None):
+    if not chat_session_id or not parent_message_id:
+        return
+    assistant_msg = {"role": "assistant", "content": response_content}
+    if tool_calls:
+        assistant_msg["tool_calls"] = tool_calls
+    new_history = list(messages) + [assistant_msg]
+    new_hash = get_messages_hash(new_history)
+    with cache_lock:
+        if len(session_cache) >= 2000:
+            first_key = next(iter(session_cache))
+            session_cache.pop(first_key, None)
+        session_cache[new_hash] = (chat_session_id, parent_message_id)
 
 # Load tokens from file or environment
 def get_tokens():
@@ -212,10 +249,26 @@ If no function calls are needed, respond normally without any `[tool_calls]` tag
 def extract_prompt(messages, tools=None):
     """Extract system prompt and user message, combining them if system prompt exists."""
     system_messages = [m["content"] for m in messages if m.get("role") == "system"]
-    user_messages = [m["content"] for m in messages if m.get("role") == "user"]
+    chat_messages = [m for m in messages if m.get("role") != "system"]
     
+    if len(chat_messages) <= 1:
+        user_message = chat_messages[-1]["content"] if chat_messages else ""
+    else:
+        formatted_turns = []
+        for m in chat_messages:
+            role = m.get("role")
+            content = m.get("content") or ""
+            if role == "assistant" and m.get("tool_calls"):
+                formatted_turns.append(f"Assistant (Tool Calls): {json.dumps(m['tool_calls'])}")
+            elif role == "tool":
+                formatted_turns.append(f"Tool Response ({m.get('name', '')}): {content}")
+            elif role == "user":
+                formatted_turns.append(f"User: {content}")
+            elif role == "assistant":
+                formatted_turns.append(f"Assistant: {content}")
+        user_message = "\n\n".join(formatted_turns)
+        
     system_prompt = "\n".join(system_messages) if system_messages else ""
-    user_message = user_messages[-1] if user_messages else (messages[-1]["content"] if messages else "")
     
     if tools:
         tool_instructions = format_tool_instructions(tools)
@@ -230,13 +283,23 @@ def extract_prompt(messages, tools=None):
 
 def chat_non_streaming(messages, model_type="default", thinking_enabled=True, tools=None):
     """Non-streaming chat"""
-    prompt = extract_prompt(messages, tools)
+    chat_session_id, parent_message_id = lookup_session(messages)
     chat = DeepSeekChat(DS_SESSION_ID, AUTHORIZATION_TOKEN)
+    
+    if chat_session_id and parent_message_id:
+        chat.chat_session_id = chat_session_id
+        chat.parent_message_id = parent_message_id
+        prompt = messages[-1].get("content") or ""
+    else:
+        prompt = extract_prompt(messages, tools)
+        
     res = chat.send_message(prompt, printing=False, thinking_enabled=thinking_enabled, search_enabled=False, model_type=model_type)
     if res and res.get("ok"):
         content = res.get("content", {})
         response_text = content.get("response", "")
         
+        is_tool_call = False
+        tool_calls = None
         if tools and "[tool_calls]" in response_text and "[/tool_calls]" in response_text:
             parts = response_text.split("[tool_calls]", 1)
             text_before = parts[0].strip()
@@ -256,21 +319,26 @@ def chat_non_streaming(messages, model_type="default", thinking_enabled=True, to
                             "arguments": json.dumps(tc.get("arguments"))
                         }
                     })
-                
+                is_tool_call = True
                 combined_content = (text_before + "\n" + text_after).strip()
-                return {
-                    "content": combined_content if combined_content else None,
-                    "tool_calls": tool_calls,
-                    "finish_reason": "tool_calls"
-                }
+                response_text = combined_content if combined_content else None
             except Exception:
                 pass
                 
-        return {
-            "content": response_text,
-            "tool_calls": None,
-            "finish_reason": "stop"
-        }
+        if is_tool_call:
+            save_session(messages, response_text, chat.chat_session_id, chat.parent_message_id, tool_calls=tool_calls)
+            return {
+                "content": response_text,
+                "tool_calls": tool_calls,
+                "finish_reason": "tool_calls"
+            }
+        else:
+            save_session(messages, response_text, chat.chat_session_id, chat.parent_message_id)
+            return {
+                "content": response_text,
+                "tool_calls": None,
+                "finish_reason": "stop"
+            }
     else:
         error_msg = res.get("content") if res else "Unknown error"
         return {
@@ -281,7 +349,16 @@ def chat_non_streaming(messages, model_type="default", thinking_enabled=True, to
 
 def chat_streaming(messages, model_type="default", thinking_enabled=True, tools=None):
     """Streaming chat using SSE and thread-safe queue"""
-    prompt = extract_prompt(messages, tools)
+    chat_session_id, parent_message_id = lookup_session(messages)
+    chat = DeepSeekChat(DS_SESSION_ID, AUTHORIZATION_TOKEN)
+    
+    if chat_session_id and parent_message_id:
+        chat.chat_session_id = chat_session_id
+        chat.parent_message_id = parent_message_id
+        prompt = messages[-1].get("content") or ""
+    else:
+        prompt = extract_prompt(messages, tools)
+        
     q = queue.Queue()
     
     def on_token(mode, text):
@@ -289,7 +366,6 @@ def chat_streaming(messages, model_type="default", thinking_enabled=True, tools=
         
     def run_chat():
         try:
-            chat = DeepSeekChat(DS_SESSION_ID, AUTHORIZATION_TOKEN)
             res = chat.send_message(prompt, printing=on_token, thinking_enabled=thinking_enabled, search_enabled=False, model_type=model_type)
             if not res or not res.get("ok"):
                 error_msg = res.get("content") if res else "Unknown error"
@@ -297,17 +373,25 @@ def chat_streaming(messages, model_type="default", thinking_enabled=True, tools=
         except Exception as e:
             q.put(("error", str(e)))
         finally:
+            q.put(("done_session", (chat.chat_session_id, chat.parent_message_id)))
             q.put(None)
             
     t = threading.Thread(target=run_chat)
     t.start()
     
     parser = StreamingToolParser() if tools else None
+    accumulated_content = ""
+    final_session_id = None
+    final_parent_id = None
     
     while True:
         item = q.get()
         if item is None:
             break
+            
+        if isinstance(item, tuple) and item[0] == "done_session":
+            final_session_id, final_parent_id = item[1]
+            continue
             
         mode, text = item
         if mode == "error":
@@ -321,6 +405,7 @@ def chat_streaming(messages, model_type="default", thinking_enabled=True, tools=
             if parser:
                 normal_delta, tool_delta, finish_reason = parser.feed(text)
                 if normal_delta:
+                    accumulated_content += normal_delta
                     data_str = json.dumps({'choices': [{'delta': {'content': normal_delta}}]})
                     yield "data: " + data_str + "\n\n"
                 if tool_delta:
@@ -330,10 +415,25 @@ def chat_streaming(messages, model_type="default", thinking_enabled=True, tools=
                     data_str = json.dumps({'choices': [{'delta': {}, 'finish_reason': finish_reason}]})
                     yield "data: " + data_str + "\n\n"
             else:
+                accumulated_content += text
                 data_str = json.dumps({'choices': [{'delta': {'content': text}}]})
                 yield "data: " + data_str + "\n\n"
                 
     yield "data: [DONE]\n\n"
+    
+    if final_session_id and final_parent_id:
+        if parser and parser.done:
+            tool_calls = [{
+                "id": parser.tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": parser.func_name,
+                    "arguments": parser.tool_buffer
+                }
+            }]
+            save_session(messages, None, final_session_id, final_parent_id, tool_calls=tool_calls)
+        else:
+            save_session(messages, accumulated_content, final_session_id, final_parent_id)
 
 @app.route("/", methods=["GET"])
 def index():

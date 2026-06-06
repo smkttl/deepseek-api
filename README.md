@@ -11,6 +11,7 @@ This project reverse-engineered the Web Interface of DeepSeek at [it's official 
 - Provides Markdown syntax for AI outputs.
 - Supports both DeepSeek V3 (fast) and R1 (reasoning with extended thinking) models.
 - **OpenAI-Compatible Function Calling**: Support for tools/functions in both streaming and non-streaming modes.
+- **Stateful Multi-Turn Conversations**: Thread-safe hybrid session caching (`(chat_session_id, parent_message_id)`) and transcript fallback mechanism to support seamless multi-turn conversations.
 
 ## Authentication
 

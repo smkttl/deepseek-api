@@ -238,9 +238,49 @@ class TestDeepSeekServer(unittest.TestCase):
         self.assertIn("location", args)
         self.assertTrue("paris" in args["location"].lower())
 
-    def tearDown(self):
+    def test_chat_completions_multi_turn(self):
+        """Test POST /v1/chat/completions multi-turn conversation caching and fallback"""
+        # Turn 1: Tell the model a secret color
+        payload1 = {
+            "model": "deepseek-v3",
+            "messages": [{"role": "user", "content": "My favorite color is green. Please remember it."}],
+            "stream": False
+        }
+        response1 = self.client.post("/v1/chat/completions", 
+                                     data=json.dumps(payload1),
+                                     content_type="application/json")
+        self.assertEqual(response1.status_code, 200)
+        data1 = response1.get_json()
+        content1 = data1["choices"][0]["message"]["content"]
+        print("\nMulti-turn Turn 1 Response:", content1)
+        
+        # Sleep to avoid rate limiting
         import time
         time.sleep(3)
+        
+        # Turn 2: Ask about the secret color
+        payload2 = {
+            "model": "deepseek-v3",
+            "messages": [
+                {"role": "user", "content": "My favorite color is green. Please remember it."},
+                {"role": "assistant", "content": content1},
+                {"role": "user", "content": "What is my favorite color?"}
+            ],
+            "stream": False
+        }
+        response2 = self.client.post("/v1/chat/completions", 
+                                     data=json.dumps(payload2),
+                                     content_type="application/json")
+        self.assertEqual(response2.status_code, 200)
+        data2 = response2.get_json()
+        content2 = data2["choices"][0]["message"]["content"]
+        print("Multi-turn Turn 2 Response:", content2)
+        
+        self.assertIn("green", content2.lower())
+
+    def tearDown(self):
+        import time
+        time.sleep(6)
 
 if __name__ == "__main__":
     unittest.main()
