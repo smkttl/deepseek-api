@@ -313,72 +313,68 @@ class TestDeepSeekServer(unittest.TestCase):
         self.assertEqual(data["error"]["type"], "invalid_request_error")
         self.assertEqual(data["error"]["code"], "bad_request")
 
-    def test_xml_streaming_tool_parser(self):
-        """Test StreamingToolParser with XML tool calls"""
-        from server import StreamingToolParser
+    def test_tagged_streaming_tool_parser(self):
+        """Test StreamingToolParser with tagged protocol tool calls"""
+        from server import StreamingToolParser, extract_tool_calls
         parser = StreamingToolParser()
         
         normal_text = "I will search for the files now.\n"
-        chunk1, tool_delta1, _ = parser.feed(normal_text)
+        chunk1 = parser.feed(normal_text)
         self.assertEqual(chunk1, normal_text)
-        self.assertIsNone(tool_delta1)
         
-        chunk2, tool_delta2, _ = parser.feed("<function_calls>")
+        chunk2 = parser.feed("[ToolCalls]\n[Call:search_files]\n")
         self.assertEqual(chunk2, "")
-        self.assertIsNone(tool_delta2)
         
-        chunk3, tool_delta3, _ = parser.feed('\n<invoke name="search_files">')
+        chunk3 = parser.feed("[CallParameter:path]\n```\n/workspace/project/backend/src\n```\n[/CallParameter]\n")
         self.assertEqual(chunk3, "")
-        self.assertEqual(len(tool_delta3), 2)
-        self.assertEqual(tool_delta3[0]["function"]["name"], "search_files")
-        self.assertEqual(tool_delta3[0]["function"]["arguments"], "")
-        self.assertEqual(tool_delta3[1]["function"]["arguments"], "{")
         
-        chunk4, tool_delta4, _ = parser.feed('\n<parameter name="path">/home/shukoi/img/kitakumpul-project/backend/src</parameter>')
+        chunk4 = parser.feed("[/Call]\n[/ToolCalls]")
         self.assertEqual(chunk4, "")
-        self.assertEqual(len(tool_delta4), 1)
-        args_str = tool_delta3[1]["function"]["arguments"] + tool_delta4[0]["function"]["arguments"] + "}"
-        args = json.loads(args_str)
-        self.assertEqual(args["path"], "/home/shukoi/img/kitakumpul-project/backend/src")
         
-        chunk5, tool_delta5, _ = parser.feed('\n<parameter name="pattern">*.')
-        self.assertEqual(chunk5, "")
-        self.assertEqual(len(tool_delta5), 1)
-        args_delta = tool_delta5[0]["function"]["arguments"]
-        self.assertTrue(len(args_delta) > 0)
+        # Test full extraction from accumulated raw text
+        raw_text = normal_text + "[ToolCalls]\n[Call:search_files]\n[CallParameter:path]\n```\n/workspace/project/backend/src\n```\n[/CallParameter]\n[/Call]\n[/ToolCalls]"
+        cleaned, tool_calls = extract_tool_calls(raw_text)
         
-        chunk6, tool_delta6, finish_reason = parser.feed('ts</parameter>\n</invoke>\n</function_calls>')
-        self.assertEqual(chunk6, "")
-        self.assertEqual(finish_reason, "tool_calls")
-        self.assertTrue(parser.done)
+        self.assertEqual(cleaned, "I will search for the files now.")
+        self.assertEqual(len(tool_calls), 1)
+        self.assertEqual(tool_calls[0]["function"]["name"], "search_files")
+        
+        args = json.loads(tool_calls[0]["function"]["arguments"])
+        self.assertEqual(args["path"], "/workspace/project/backend/src")
 
-    def test_xml_non_streaming_tool_parser(self):
-        """Test extract_tool_calls_from_text with XML tool calls"""
+    def test_tagged_non_streaming_tool_parser(self):
+        """Test extract_tool_calls_from_text with tagged protocol tool calls"""
         from server import extract_tool_calls_from_text
         tools = [{"type": "function", "function": {"name": "search_files"}}]
         
-        xml_response = """
+        tagged_response = """
 I'll check the current state of photo upload features across the codebase.
 
-<function_calls>
-<invoke name="search_files">
-<parameter name="path" string="true">/home/shukoi/img/kitakumpul-project/backend/src</parameter>
-<parameter name="pattern" string="true">*.ts</parameter>
-<parameter name="target" string="true">files</parameter>
-</invoke>
-</function_calls>
+[ToolCalls]
+[Call:search_files]
+[CallParameter:path]
+```
+/workspace/project/backend/src
+```
+[/CallParameter]
+[CallParameter:pattern]
+```
+*.ts
+```
+[/CallParameter]
+[/Call]
+[/ToolCalls]
         """.strip()
         
-        is_tool_call, tool_calls, final_content = extract_tool_calls_from_text(xml_response, tools)
+        is_tool_call, tool_calls, final_content = extract_tool_calls_from_text(tagged_response, tools)
         self.assertTrue(is_tool_call)
         self.assertEqual(final_content.strip(), "I'll check the current state of photo upload features across the codebase.")
         self.assertEqual(len(tool_calls), 1)
         self.assertEqual(tool_calls[0]["function"]["name"], "search_files")
         
         args = json.loads(tool_calls[0]["function"]["arguments"])
-        self.assertEqual(args["path"], "/home/shukoi/img/kitakumpul-project/backend/src")
+        self.assertEqual(args["path"], "/workspace/project/backend/src")
         self.assertEqual(args["pattern"], "*.ts")
-        self.assertEqual(args["target"], "files")
 
     def tearDown(self):
         import time

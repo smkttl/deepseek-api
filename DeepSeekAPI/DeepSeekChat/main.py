@@ -30,28 +30,29 @@ class DeepSeekChat:
         self.authorization=authorization_token
         self.headers={
             "accept": "*/*",
-            "accept-language": "zh-CN,zh;q=0.9,fr;q=0.8",
+            "accept-language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
             "authorization": self.authorization,
             "content-type": "application/json",
-            "priority": "u=1, i",
+            "sec-ch-ua": '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Linux"',
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
             "x-app-version": "2.0.0",
-            "x-client-locale": "zh_CN",
+            "x-client-locale": "en_US",
             "x-client-platform": "web",
             "x-client-version": "2.0.0",
-            "x-debug-lite-model-channel": "prod",
-            "x-debug-model-channel": "prod",
-            "user-agent": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/142.0"
+            "x-client-timezone-offset": "25200",
+            "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
         }
         self.chat_session_id = None
         self.parent_message_id = None
     def create_chat_session(self):
         url=f"{self.base_url}/api/v0/chat_session/create"
         headers=self.headers.copy()
-        headers["referer"]=f"{self.base_url}/"
-        headers["referrer"]=f"{self.base_url}/"
+        headers["Referer"]=f"{self.base_url}/"
+        headers["Referrer"]=f"{self.base_url}/"
         response = self.session.post(url,headers=headers,data="{}",timeout=30)
         if response.status_code==200:
             result = response.json()
@@ -71,11 +72,11 @@ class DeepSeekChat:
         data={"target_path":"/api/v0/chat/completion"}
         headers=self.headers.copy()
         if self.chat_session_id:
-            headers["referer"]=f"{self.base_url}/a/chat/s/{self.chat_session_id}"
-            headers["referrer"]=f"{self.base_url}/a/chat/s/{self.chat_session_id}"
+            headers["Referer"]=f"{self.base_url}/a/chat/s/{self.chat_session_id}"
+            headers["Referrer"]=f"{self.base_url}/a/chat/s/{self.chat_session_id}"
         else:
-            headers["referer"]=f"{self.base_url}/"
-            headers["referrer"]=f"{self.base_url}/"
+            headers["Referer"]=f"{self.base_url}/"
+            headers["Referrer"]=f"{self.base_url}/"
         response=self.session.post(url,headers=headers,data=json.dumps(data),timeout=30)
         if response.status_code == 200:
             result=response.json()
@@ -126,11 +127,11 @@ class DeepSeekChat:
                 headers["x-ds-pow-response"] = pow_response
                 headers["accept"] = "text/event-stream"
                 if self.chat_session_id:
-                    headers["referer"] = f"{self.base_url}/a/chat/s/{self.chat_session_id}"
-                    headers["referrer"] = f"{self.base_url}/a/chat/s/{self.chat_session_id}"
+                    headers["Referer"] = f"{self.base_url}/a/chat/s/{self.chat_session_id}"
+                    headers["Referrer"] = f"{self.base_url}/a/chat/s/{self.chat_session_id}"
                 else:
-                    headers["referer"] = f"{self.base_url}/"
-                    headers["referrer"] = f"{self.base_url}/"
+                    headers["Referer"] = f"{self.base_url}/"
+                    headers["Referrer"] = f"{self.base_url}/"
                 data = {
                     "chat_session_id": self.chat_session_id,
                     "parent_message_id": self.parent_message_id,
@@ -262,6 +263,8 @@ class DeepSeekChat:
                 for line in response.iter_lines(decode_unicode=True):
                     if line and len(line)>0:
                         if type(line)==str:
+                            if line.startswith(':'):
+                                continue
                             if line.startswith('data: '):
                                 data=json.loads(line[6:])
                                 if event=='update_session':

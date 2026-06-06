@@ -36,26 +36,13 @@ def get_messages_hash(messages):
     return hashlib.sha256(json.dumps(normalized, sort_keys=True).encode('utf-8')).hexdigest()
 
 def lookup_session(messages):
-    if not messages or len(messages) <= 1:
-        return None, None
-    prefix = messages[:-1]
-    prefix_hash = get_messages_hash(prefix)
-    with cache_lock:
-        return session_cache.get(prefix_hash, (None, None))
+    # Since sessions are deleted after every request to keep the sidebar clean,
+    # we bypass the session cache to avoid using stale sessions and prevent 
+    # unnecessary round-trip failures.
+    return None, None
 
 def save_session(messages, response_content, chat_session_id, parent_message_id, tool_calls=None):
-    if not chat_session_id or not parent_message_id:
-        return
-    assistant_msg = {"role": "assistant", "content": response_content}
-    if tool_calls:
-        assistant_msg["tool_calls"] = tool_calls
-    new_history = list(messages) + [assistant_msg]
-    new_hash = get_messages_hash(new_history)
-    with cache_lock:
-        if len(session_cache) >= 2000:
-            first_key = next(iter(session_cache))
-            session_cache.pop(first_key, None)
-        session_cache[new_hash] = (chat_session_id, parent_message_id)
+    return
 
 # Load tokens from file or environment
 def get_tokens():
@@ -83,378 +70,246 @@ def get_model_config(model: str):
     thinking_enabled = "r1" in model_lower or "r4" in model_lower or "reasoning" in model_lower or "reasoner" in model_lower
     return model_type, thinking_enabled
 
+TOOL_WRAP_HINT = (
+    "\n\n### SYSTEM: TOOL CALLING PROTOCOL (MANDATORY) ###\n"
+    "If tool execution is required, you MUST adhere to this EXACT protocol. No exceptions.\n\n"
+    "1. OUTPUT RESTRICTION: Your response MUST contain ONLY the [ToolCalls] block. Conversational filler, preambles, or concluding remarks are STRICTLY PROHIBITED.\n"
+    "2. WRAPPING LOGIC: Every parameter value MUST be enclosed in a markdown code block. Use 3 backticks (```) by default. If the value contains backticks, the outer fence MUST be longer than any sequence inside (e.g., ````).\n"
+    "3. TAG SYMMETRY: All tags MUST be balanced and closed in the exact reverse order of opening. Incomplete or unclosed blocks are strictly prohibited.\n\n"
+    "REQUIRED SYNTAX:\n"
+    "[ToolCalls]\n"
+    "[Call:tool_name]\n"
+    "[CallParameter:parameter_name]\n"
+    "```\n"
+    "value\n"
+    "```\n"
+    "[/CallParameter]\n"
+    "[/Call]\n"
+    "[/ToolCalls]\n\n"
+    "CRITICAL: Do NOT mix natural language with protocol tags. Either respond naturally OR provide the protocol block alone. There is no middle ground."
+)
+
+TOOL_BLOCK_RE = re.compile(
+    r"\\?\[ToolCalls\\?](.*?)\\?\[\\?/ToolCalls\\?]",
+    re.DOTALL | re.IGNORECASE,
+)
+TOOL_CALL_RE = re.compile(
+    r"\\?\[Call\\?:(?P<name>[^]]+)\\?](?P<body>.*?)\\?\[\\?/Call\\?]",
+    re.DOTALL | re.IGNORECASE,
+)
+TAGGED_ARG_RE = re.compile(
+    r"\\?\[CallParameter\\?:(?P<name>[^]]+)\\?](?P<body>.*?)\\?\[\\?/CallParameter\\?]",
+    re.DOTALL | re.IGNORECASE,
+)
+COMMONMARK_UNESCAPE_RE = re.compile(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])")
+PARAM_FENCE_RE = re.compile(r"^(?P<fence>`{3,})")
+
+_START_PATTERNS = {
+    "TOOL": r"\\?\[ToolCalls\\?]",
+    "ORPHAN": r"\\?\[Call\\?:[^]]+\\?]",
+    "ARG": r"\\?\[CallParameter\\?:[^]]+\\?]",
+}
+_PROTOCOL_ENDS = r"\\?\[\\?/(?:ToolCalls|Call|CallParameter)\\?]"
+
+_master_parts = [f"(?P<{name}_START>{pattern})" for name, pattern in _START_PATTERNS.items()]
+_master_parts.extend((f"(?P<PROTOCOL_EXIT>{_PROTOCOL_ENDS})",))
+
+STREAM_MASTER_RE = re.compile("|".join(_master_parts), re.IGNORECASE)
+STREAM_TAIL_RE = re.compile(
+    r"(?:\\|\\?\[[^]]*)$",
+    re.IGNORECASE,
+)
+
+def unescape_text(s: str) -> str:
+    """Remove CommonMark backslash escapes from LLM-generated text."""
+    return COMMONMARK_UNESCAPE_RE.sub(r"\1", s) if s else ""
+
+def strip_markdown_fence(s: str) -> str:
+    s = s.strip()
+    if not s:
+        return ""
+    match = PARAM_FENCE_RE.match(s)
+    if not match or not s.endswith(match.group("fence")):
+        return s
+    fence = match.group("fence")
+    lines = s.splitlines()
+    if len(lines) >= 3 and lines[-1].strip() == fence:
+        return "\n".join(lines[1:-1])
+    return s[len(fence) : -len(fence)].strip()
+
+def _parse_tool_argument_value(raw_value: str):
+    value = strip_markdown_fence(raw_value)
+    if not value:
+        return ""
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+def strip_system_hints(text: str) -> str:
+    if not text:
+        return text
+    t_unescaped = unescape_text(text)
+    cleaned = t_unescaped.replace(TOOL_WRAP_HINT, "")
+    cleaned = TOOL_BLOCK_RE.sub("", cleaned)
+    cleaned = TOOL_CALL_RE.sub("", cleaned)
+    cleaned = TAGGED_ARG_RE.sub("", cleaned)
+    return cleaned
+
+def extract_tool_calls(text: str):
+    if not text:
+        return text, []
+
+    tool_calls = []
+
+    def _create_tool_call(name: str, raw_args: str) -> None:
+        if not name:
+            return
+        name = unescape_text(name.strip())
+        raw_args = unescape_text(raw_args)
+
+        arg_matches = TAGGED_ARG_RE.findall(raw_args)
+        if arg_matches:
+            args_dict = {
+                arg_name.strip(): _parse_tool_argument_value(arg_value)
+                for arg_name, arg_value in arg_matches
+            }
+            arguments = json.dumps(args_dict)
+        else:
+            arguments = "{}"
+
+        index = len(tool_calls)
+        call_id = f"call_{name}_{index}_{int(time.time())}"
+
+        tool_calls.append({
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": arguments
+            }
+        })
+
+    for match in TOOL_CALL_RE.finditer(text):
+        _create_tool_call(match.group(1), match.group(2))
+
+    cleaned = strip_system_hints(text).strip()
+    return cleaned, tool_calls
+
+def extract_tool_calls_from_text(response_text, tools):
+    if not tools:
+        return False, None, response_text
+    
+    cleaned, tool_calls = extract_tool_calls(response_text)
+    if tool_calls:
+        return True, tool_calls, (cleaned if cleaned else None)
+    return False, None, response_text
+
+class StreamingOutputFilter:
+    def __init__(self):
+        self.buffer = ""
+        self.stack = ["NORMAL"]
+
+    @property
+    def state(self):
+        return self.stack[-1]
+
+    def _is_outputting(self) -> bool:
+        if self.state == "POST_BLOCK":
+            return False
+        return self.state == "NORMAL"
+
+    def process(self, chunk: str) -> str:
+        self.buffer += chunk
+        output = []
+
+        while self.buffer:
+            if self.state == "POST_BLOCK":
+                stripped = self.buffer.lstrip()
+                if not stripped:
+                    break
+                self.buffer = stripped
+                self.stack[-1] = "NORMAL"
+
+            match = STREAM_MASTER_RE.search(self.buffer)
+            if not match:
+                if tail_match := STREAM_TAIL_RE.search(self.buffer):
+                    yield_len = len(self.buffer) - len(tail_match.group(0))
+                    if yield_len > 0:
+                        if self._is_outputting():
+                            output.append(self.buffer[:yield_len])
+                        self.buffer = self.buffer[yield_len:]
+                else:
+                    if self._is_outputting():
+                        output.append(self.buffer)
+                    self.buffer = ""
+                break
+
+            start, end = match.span()
+            matched_group = match.lastgroup
+            pre_text = self.buffer[:start]
+
+            if self._is_outputting():
+                output.append(pre_text)
+
+            if matched_group and matched_group.endswith("_START"):
+                m_type = matched_group.split("_")[0]
+                self.stack.append(f"IN_{m_type}")
+            elif matched_group in ("PROTOCOL_EXIT",):
+                if len(self.stack) > 1:
+                    self.stack.pop()
+                else:
+                    self.stack = ["NORMAL"]
+
+                if self.state == "NORMAL" and matched_group in ("PROTOCOL_EXIT",):
+                    self.stack[-1] = "POST_BLOCK"
+
+            self.buffer = self.buffer[end:]
+
+        return "".join(output)
+
+    def flush(self) -> str:
+        res = ""
+        if self._is_outputting():
+            res = self.buffer
+            if tail_match := STREAM_TAIL_RE.search(res):
+                res = res[: -len(tail_match.group(0))]
+
+        self.buffer = ""
+        self.stack = ["NORMAL"]
+        return strip_system_hints(res)
+
 class StreamingToolParser:
     def __init__(self):
-        self.in_tool_calls = False
-        self.mode = None # "json" or "xml"
-        self.normal_buffer = ""
-        self.tool_buffer = ""
-        self.done = False
+        self.filter = StreamingOutputFilter()
         
-        # JSON specific state
-        self.yielded_name = False
-        self.tool_call_id = f"call_{int(time.time())}"
-        self.arg_start_idx = -1
-        self.arg_yielded_len = 0
-        self.brace_count = 0
-        
-        # XML specific state
-        self.xml_yielded_calls = [] # list of dict: {"index": idx, "id": call_id, "name": name, "yielded_len": 0}
-
     def feed(self, chunk):
-        if self.done:
-            return chunk, None, None
-            
-        if not self.in_tool_calls:
-            self.normal_buffer += chunk
-            
-            # Check for JSON format start
-            if "[tool_calls]" in self.normal_buffer:
-                parts = self.normal_buffer.split("[tool_calls]", 1)
-                normal_delta = parts[0]
-                self.in_tool_calls = True
-                self.mode = "json"
-                self.normal_buffer = ""
-                rest = parts[1]
-                return self._feed_json(rest, normal_delta)
-                
-            # Check for XML format start
-            elif "<function_calls>" in self.normal_buffer or "<invoke" in self.normal_buffer:
-                tag = "<function_calls>" if "<function_calls>" in self.normal_buffer else "<invoke"
-                parts = self.normal_buffer.split(tag, 1)
-                normal_delta = parts[0]
-                self.in_tool_calls = True
-                self.mode = "xml"
-                self.normal_buffer = ""
-                rest = tag + parts[1]
-                return self._feed_xml(rest, normal_delta)
-                
-            else:
-                tags = ["[tool_calls]", "<function_calls>", "<invoke"]
-                hold_len = 0
-                for tag in tags:
-                    for i in range(1, len(tag)):
-                        suffix = self.normal_buffer[-i:]
-                        if tag.startswith(suffix):
-                            hold_len = max(hold_len, i)
-                            
-                if hold_len > 0:
-                    yield_str = self.normal_buffer[:-hold_len]
-                    self.normal_buffer = self.normal_buffer[-hold_len:]
-                    return yield_str, None, None
-                else:
-                    yield_str = self.normal_buffer
-                    self.normal_buffer = ""
-                    return yield_str, None, None
-        else:
-            if self.mode == "json":
-                return self._feed_json(chunk, "")
-            else:
-                return self._feed_xml(chunk, "")
-
-    def _feed_json(self, chunk, normal_prefix):
-        tool_res = self._feed_tool_json(chunk)
-        if isinstance(tool_res, tuple):
-            tool_delta, finish_reason, after_normal = tool_res
-            return normal_prefix + after_normal, tool_delta, finish_reason
-        else:
-            return normal_prefix, tool_res, None
-
-    def _feed_tool_json(self, chunk):
-        self.tool_buffer += chunk
+        return self.filter.process(chunk)
         
-        if "[/tool_calls]" in self.tool_buffer:
-            parts = self.tool_buffer.split("[/tool_calls]", 1)
-            tool_content = parts[0]
-            self.done = True
-            self.tool_buffer = tool_content
-            tool_delta = self._parse_tool_delta_json()
-            if tool_delta is None:
-                tool_delta = []
-            normal_delta = parts[1] if len(parts) > 1 else ""
-            return tool_delta, "tool_calls", normal_delta
-        else:
-            tag = "[/tool_calls]"
-            hold_len = 0
-            for i in range(1, len(tag)):
-                suffix = self.tool_buffer[-i:]
-                if tag.startswith(suffix):
-                    hold_len = i
-            if hold_len > 0:
-                active_content = self.tool_buffer[:-hold_len]
-                return self._parse_tool_delta_json(limit=len(active_content))
-            else:
-                return self._parse_tool_delta_json()
-
-    def _parse_tool_delta_json(self, limit=None):
-        content_to_parse = self.tool_buffer if limit is None else self.tool_buffer[:limit]
-        tool_delta = []
-        
-        if not self.yielded_name:
-            match = re.search(r'["\']name["\']\s*:\s*["\']([^"\']+)["\']', content_to_parse)
-            if match:
-                self.func_name = match.group(1)
-                self.yielded_name = True
-                tool_delta.append({
-                    "index": 0,
-                    "id": self.tool_call_id,
-                    "type": "function",
-                    "function": {
-                        "name": self.func_name,
-                        "arguments": ""
-                    }
-                })
-        
-        if self.yielded_name and self.arg_start_idx == -1:
-            match_args = re.search(r'["\']arguments["\']\s*:\s*', content_to_parse)
-            if match_args:
-                end_pos = match_args.end()
-                sub = content_to_parse[end_pos:]
-                brace_match = re.search(r'[\{\[]', sub)
-                if brace_match:
-                    self.arg_start_idx = end_pos + brace_match.start()
-                    self.arg_yielded_len = 0
-                    self.brace_count = 0
-                    
-        if self.arg_start_idx != -1:
-            args_sub = content_to_parse[self.arg_start_idx:]
-            new_chars = args_sub[self.arg_yielded_len:]
-            for char in new_chars:
-                if char in ('{', '['):
-                    self.brace_count += 1
-                elif char in ('}', ']'):
-                    self.brace_count -= 1
-                
-                if self.brace_count >= 0:
-                    tool_delta.append({
-                        "index": 0,
-                        "function": {
-                            "arguments": char
-                        }
-                    })
-                    self.arg_yielded_len += 1
-                else:
-                    break
-                    
-        return tool_delta if tool_delta else None
-
-    def _feed_xml(self, chunk, normal_prefix):
-        self.tool_buffer += chunk
-        
-        # Check if XML block is closed
-        if "</function_calls>" in self.tool_buffer:
-            parts = self.tool_buffer.split("</function_calls>", 1)
-            active_xml = parts[0]
-            self.done = True
-            tool_delta = self._parse_xml_delta(active_xml)
-            normal_suffix = parts[1] if len(parts) > 1 else ""
-            return normal_prefix + normal_suffix, tool_delta, "tool_calls"
-            
-        tool_delta = self._parse_xml_delta(self.tool_buffer)
-        return normal_prefix, tool_delta, None
-
-    def _parse_xml_struct(self, buffer):
-        tool_calls = []
-        parts = buffer.split("<invoke")
-        for idx, part in enumerate(parts[1:]):
-            match_name = re.search(r'name\s*=\s*["\']([^"\']+)["\']\s*>', part)
-            if not match_name:
-                continue
-            name = match_name.group(1)
-            
-            params = {}
-            param_matches = re.finditer(r'<parameter\s+name=["\']([^"\']+)["\'][^>]*>([^<]*)</parameter>', part)
-            for pm in param_matches:
-                p_name = pm.group(1)
-                p_val = pm.group(2)
-                params[p_name] = p_val
-                
-            is_complete = "</invoke>" in part
-            
-            # Active parameter (partially typed)
-            if not is_complete:
-                active_match = re.search(r'<parameter\s+name=["\']([^"\']+)["\'][^>]*>([^<]*)$', part)
-                if active_match:
-                    p_name = active_match.group(1)
-                    p_val = active_match.group(2)
-                    params[p_name] = p_val
-                    
-            tool_calls.append({
-                "index": idx,
-                "name": name,
-                "arguments": params,
-                "is_complete": is_complete
-            })
-        return tool_calls
-
-    def _parse_xml_delta(self, buffer):
-        tool_delta = []
-        parts = buffer.split("<invoke")
-        for idx, part in enumerate(parts[1:]):
-            match_name = re.search(r'name\s*=\s*["\']([^"\']+)["\']\s*>', part)
-            if not match_name:
-                continue
-            name = match_name.group(1)
-            
-            tracked = None
-            for tc in self.xml_yielded_calls:
-                if tc["index"] == idx:
-                    tracked = tc
-                    break
-            if not tracked:
-                call_id = f"call_{name}_{idx}_{int(time.time())}"
-                tracked = {
-                    "index": idx,
-                    "id": call_id,
-                    "name": name,
-                    "started_args": False,
-                    "yielded_params": {},
-                    "completed_params_order": [],
-                    "active_param": None,
-                    "closed": False
-                }
-                self.xml_yielded_calls.append(tracked)
-                tool_delta.append({
-                    "index": idx,
-                    "id": call_id,
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": ""
-                    }
-                })
-                
-            args_delta = ""
-            if not tracked["started_args"]:
-                args_delta += "{"
-                tracked["started_args"] = True
-                
-            param_matches = list(re.finditer(r'<parameter\s+name=["\']([^"\']+)["\'][^>]*>([^<]*)</parameter>', part))
-            completed_names = []
-            completed_values = {}
-            for pm in param_matches:
-                p_name = pm.group(1)
-                p_val = pm.group(2)
-                completed_names.append(p_name)
-                completed_values[p_name] = p_val
-                
-            active_name = None
-            active_val = ""
-            is_invoke_complete = "</invoke>" in part
-            
-            if not is_invoke_complete:
-                active_match = re.search(r'<parameter\s+name=["\']([^"\']+)["\'][^>]*>([^<]*)$', part)
-                if active_match:
-                    active_name = active_match.group(1)
-                    active_val = active_match.group(2)
-                    
-            for p_name in completed_names:
-                p_val = completed_values[p_name]
-                if p_name not in tracked["yielded_params"]:
-                    tracked["yielded_params"][p_name] = {
-                        "started": False,
-                        "completed": False,
-                        "yielded_val": ""
-                    }
-                
-                p_state = tracked["yielded_params"][p_name]
-                if not p_state["completed"]:
-                    p_delta = ""
-                    if not p_state["started"]:
-                        if tracked["completed_params_order"]:
-                            p_delta += ", "
-                        p_delta += f'"{p_name}": "'
-                        p_state["started"] = True
-                        if p_name not in tracked["completed_params_order"]:
-                            tracked["completed_params_order"].append(p_name)
-                            
-                    val_to_yield = p_val[len(p_state["yielded_val"]):]
-                    p_delta += json.dumps(val_to_yield)[1:-1]
-                    p_state["yielded_val"] = p_val
-                    p_delta += '"'
-                    p_state["completed"] = True
-                    args_delta += p_delta
-                    
-            if active_name:
-                if active_name not in tracked["yielded_params"]:
-                    tracked["yielded_params"][active_name] = {
-                        "started": False,
-                        "completed": False,
-                        "yielded_val": ""
-                    }
-                p_state = tracked["yielded_params"][active_name]
-                if not p_state["completed"]:
-                    p_delta = ""
-                    if not p_state["started"]:
-                        if tracked["completed_params_order"]:
-                            p_delta += ", "
-                        p_delta += f'"{active_name}": "'
-                        p_state["started"] = True
-                        if active_name not in tracked["completed_params_order"]:
-                            tracked["completed_params_order"].append(active_name)
-                            
-                    val_to_yield = active_val[len(p_state["yielded_val"]):]
-                    p_delta += json.dumps(val_to_yield)[1:-1]
-                    p_state["yielded_val"] = active_val
-                    args_delta += p_delta
-                    
-            if is_invoke_complete and not tracked["closed"]:
-                for p_name, p_state in tracked["yielded_params"].items():
-                    if p_state["started"] and not p_state["completed"]:
-                        args_delta += '"'
-                        p_state["completed"] = True
-                args_delta += "}"
-                tracked["closed"] = True
-                
-            if args_delta:
-                tool_delta.append({
-                    "index": idx,
-                    "function": {
-                        "arguments": args_delta
-                    }
-                })
-                
-        return tool_delta if tool_delta else None
+    def flush(self):
+        return self.filter.flush()
 
 def format_tool_instructions(tools):
     if not tools:
         return ""
-    
-    tools_formatted = []
+
+    lines = [
+        "SYSTEM INTERFACE: You have access to the following technical tools. You MUST invoke them when necessary to fulfill the request, strictly adhering to the provided JSON schemas."
+    ]
+
     for tool in tools:
         if tool.get("type") == "function":
-            tools_formatted.append(tool["function"])
-            
-    tools_json = json.dumps(tools_formatted, indent=2)
-    
-    instructions = f"""
-You have access to the following functions (tools) that you can call if needed:
-{tools_json}
+            function = tool["function"]
+            description = function.get("description") or "No description provided."
+            lines.append(f"Tool `{function['name']}`: {description}")
+            if function.get("parameters"):
+                schema_text = json.dumps(function["parameters"], sort_keys=True)
+                lines.append(f"Arguments JSON schema: {schema_text}")
+            else:
+                lines.append("Arguments JSON schema: {}")
 
-If you decide to call any function(s), you MUST use one of the following formats:
-
-Format 1 (XML - preferred for agents):
-<function_calls>
-<invoke name="function_name">
-<parameter name="param1">value1</parameter>
-</invoke>
-</function_calls>
-
-Format 2 (JSON):
-[tool_calls]
-[
-  {{
-    "name": "function_name",
-    "arguments": {{
-      "param1": "value1"
-    }}
-  }}
-]
-[/tool_calls]
-
-If you call a function, do not output any other text or reasoning inside the tags or blocks. You may provide regular response text outside of the block/tags.
-"""
-    return instructions
+    lines.append(TOOL_WRAP_HINT)
+    return "\n".join(lines)
 
 def extract_prompt(messages, tools=None):
     """Extract system prompt and user message, combining them if system prompt exists."""
@@ -462,23 +317,92 @@ def extract_prompt(messages, tools=None):
     chat_messages = [m for m in messages if m.get("role") != "system"]
     
     if len(chat_messages) <= 1:
-        user_message = chat_messages[-1]["content"] if chat_messages else ""
+        m = chat_messages[-1] if chat_messages else None
+        if m and m.get("role") == "tool":
+            tool_name = m.get("name") or "unknown"
+            user_message = f"[Tool Response ({tool_name})]: [ToolResults]\n[Result:{tool_name}]\n[ToolResult]\n{m.get('content') or ''}\n[/ToolResult]\n[/Result]\n[/ToolResults]"
+        else:
+            user_message = m.get("content") or "" if m else ""
     else:
         formatted_turns = []
+        
+        # Build tool_id to name mapping
+        tool_id_to_name = {}
+        for m in chat_messages:
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    tool_id_to_name[tc.get("id")] = tc.get("function", {}).get("name")
+                    
         for m in chat_messages[:-1]:
             role = m.get("role")
             content = m.get("content") or ""
+            
+            # Truncate content of individual history messages if they are too long
+            if len(content) > 1500:
+                content = content[:1500] + "\n... [Content Truncated for Length] ..."
+                
             if role == "assistant" and m.get("tool_calls"):
-                formatted_turns.append(f"[Assistant (Tool Calls)]: {json.dumps(m['tool_calls'])}")
+                # Format previous tool calls using the PascalCase protocol
+                tool_blocks = []
+                for call in m["tool_calls"]:
+                    func = call.get("function", {})
+                    params_text = func.get("arguments", "").strip()
+                    formatted_params = ""
+                    if params_text:
+                        try:
+                            parsed_params = json.loads(params_text)
+                            if isinstance(parsed_params, dict):
+                                for k, v in parsed_params.items():
+                                    val_str = v if isinstance(v, str) else json.dumps(v)
+                                    formatted_params += f"[CallParameter:{k}]\n```\n{val_str}\n```\n[/CallParameter]\n"
+                            else:
+                                formatted_params += f"```\n{params_text}\n```\n"
+                        except Exception:
+                            formatted_params += f"```\n{params_text}\n```\n"
+                    tool_blocks.append(f"[Call:{func.get('name')}]\n{formatted_params}[/Call]")
+                
+                tool_section = "[ToolCalls]\n" + "\n".join(tool_blocks) + "\n[/ToolCalls]"
+                prefix = f"{content}\n" if content else ""
+                formatted_turns.append(f"[Assistant]: {prefix}{tool_section}")
+                
             elif role == "tool":
-                formatted_turns.append(f"[Tool Response ({m.get('name', '')})]: {content}")
+                tool_name = m.get("name") or tool_id_to_name.get(m.get("tool_call_id")) or "unknown"
+                wrapped_content = f"[ToolResults]\n[Result:{tool_name}]\n[ToolResult]\n{content}\n[/ToolResult]\n[/Result]\n[/ToolResults]"
+                formatted_turns.append(f"[Tool Response ({tool_name})]: {wrapped_content}")
             elif role == "user":
                 formatted_turns.append(f"[User]: {content}")
             elif role == "assistant":
                 formatted_turns.append(f"[Assistant]: {content}")
-        history_str = "\n".join(formatted_turns)
-        last_msg = chat_messages[-1]["content"] if chat_messages else ""
-        user_message = f"Conversation History:\n{history_str}\n\n[User]: {last_msg}"
+                
+        # Format the last message
+        last_msg_obj = chat_messages[-1]
+        last_msg_role = last_msg_obj.get("role")
+        last_msg_content = last_msg_obj.get("content") or ""
+        
+        if last_msg_role == "tool":
+            tool_name = last_msg_obj.get("name") or tool_id_to_name.get(last_msg_obj.get("tool_call_id")) or "unknown"
+            formatted_last = f"[Tool Response ({tool_name})]: [ToolResults]\n[Result:{tool_name}]\n[ToolResult]\n{last_msg_content}\n[/ToolResult]\n[/Result]\n[/ToolResults]"
+        elif last_msg_role == "user":
+            formatted_last = f"[User]: {last_msg_content}"
+        else:
+            formatted_last = f"[{last_msg_role.capitalize()}]: {last_msg_content}"
+        
+        # Keep most recent turns under a total length limit to fit into DeepSeek web UI limits
+        allowed_history_chars = 4000
+        pruned_turns = []
+        total_len = 0
+        for turn in reversed(formatted_turns):
+            if total_len + len(turn) + 1 <= allowed_history_chars:
+                pruned_turns.insert(0, turn)
+                total_len += len(turn) + 1
+            else:
+                break
+                
+        if len(pruned_turns) < len(formatted_turns):
+            pruned_turns.insert(0, "... [Older Conversation History Omitted to Prevent Length Error] ...")
+            
+        history_str = "\n".join(pruned_turns)
+        user_message = f"Conversation History:\n{history_str}\n\n{formatted_last}"
         
     system_prompt = "\n".join(system_messages) if system_messages else ""
     
@@ -492,78 +416,6 @@ def extract_prompt(messages, tools=None):
     if system_prompt:
         return f"System Prompt:\n{system_prompt}\n\nUser Message:\n{user_message}"
     return user_message
-
-def extract_tool_calls_from_text(response_text, tools):
-    if not tools:
-        return False, None, response_text
-
-    # 1. Check for JSON [tool_calls] block
-    if "[tool_calls]" in response_text and "[/tool_calls]" in response_text:
-        parts = response_text.split("[tool_calls]", 1)
-        text_before = parts[0].strip()
-        rest = parts[1].split("[/tool_calls]", 1)
-        tool_json = rest[0].strip()
-        text_after = rest[1].strip() if len(rest) > 1 else ""
-        try:
-            tool_calls_raw = json.loads(tool_json)
-            tool_calls = []
-            for i, tc in enumerate(tool_calls_raw):
-                tool_calls.append({
-                    "id": f"call_{tc.get('name', '')}_{i}_{int(time.time())}",
-                    "type": "function",
-                    "function": {
-                        "name": tc.get("name"),
-                        "arguments": json.dumps(tc.get("arguments"))
-                    }
-                })
-            combined_content = (text_before + "\n" + text_after).strip()
-            return True, tool_calls, (combined_content if combined_content else None)
-        except Exception:
-            pass
-
-    # 2. Check for XML <function_calls> or <invoke block
-    if "<function_calls>" in response_text or "<invoke" in response_text:
-        tag_start = "<function_calls>" if "<function_calls>" in response_text else "<invoke"
-        parts = response_text.split(tag_start, 1)
-        text_before = parts[0].strip()
-        
-        tag_end = "</function_calls>" if "</function_calls>" in response_text else "</invoke>"
-        rest_parts = parts[1].split(tag_end, 1)
-        xml_content = tag_start + rest_parts[0] + tag_end
-        text_after = rest_parts[1].strip() if len(rest_parts) > 1 else ""
-        
-        try:
-            tool_calls = []
-            parts_inv = xml_content.split("<invoke")
-            for idx, part in enumerate(parts_inv[1:]):
-                match_name = re.search(r'name\s*=\s*["\']([^"\']+)["\']\s*>', part)
-                if not match_name:
-                    continue
-                name = match_name.group(1)
-                
-                params = {}
-                param_matches = re.finditer(r'<parameter\s+name=["\']([^"\']+)["\'][^>]*>([^<]*)</parameter>', part)
-                for pm in param_matches:
-                    p_name = pm.group(1)
-                    p_val = pm.group(2)
-                    params[p_name] = p_val
-                    
-                tool_calls.append({
-                    "id": f"call_{name}_{idx}_{int(time.time())}",
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": json.dumps(params)
-                    }
-                })
-                
-            if tool_calls:
-                combined_content = (text_before + "\n" + text_after).strip()
-                return True, tool_calls, (combined_content if combined_content else None)
-        except Exception:
-            pass
-
-    return False, None, response_text
 
 def chat_non_streaming(messages, model_type="default", thinking_enabled=True, tools=None):
     """Non-streaming chat"""
@@ -672,6 +524,7 @@ def chat_streaming(messages, model_type="default", thinking_enabled=True, tools=
     
     parser = StreamingToolParser() if tools else None
     accumulated_content = ""
+    raw_response_text = ""
     final_session_id = None
     final_parent_id = None
     
@@ -691,50 +544,46 @@ def chat_streaming(messages, model_type="default", thinking_enabled=True, tools=
         elif mode == "THINK":
             yield {"type": "think", "text": text}
         elif mode == "RESPONSE":
+            raw_response_text += text
             if parser:
-                normal_delta, tool_delta, finish_reason = parser.feed(text)
+                normal_delta = parser.feed(text)
                 if normal_delta:
                     accumulated_content += normal_delta
                     yield {"type": "content", "text": normal_delta}
-                if tool_delta:
-                    yield {"type": "tool_calls", "calls": tool_delta}
-                if finish_reason:
-                    yield {"type": "finish_reason", "reason": finish_reason}
             else:
                 accumulated_content += text
                 yield {"type": "content", "text": text}
                 
-    if final_session_id and final_parent_id:
-        if parser and parser.done:
-            if parser.mode == "json":
-                tool_calls = [{
-                    "id": parser.tool_call_id,
+    if parser:
+        remaining_content = parser.flush()
+        if remaining_content:
+            accumulated_content += remaining_content
+            yield {"type": "content", "text": remaining_content}
+            
+    if tools:
+        cleaned, tool_calls = extract_tool_calls(raw_response_text)
+        if tool_calls:
+            formatted_calls = []
+            for idx, call in enumerate(tool_calls):
+                formatted_calls.append({
+                    "index": idx,
+                    "id": call["id"],
                     "type": "function",
                     "function": {
-                        "name": parser.func_name,
-                        "arguments": parser.tool_buffer
+                        "name": call["function"]["name"],
+                        "arguments": call["function"]["arguments"]
                     }
-                }]
-            else:
-                # XML mode
-                tool_calls = []
-                for tc in parser.xml_yielded_calls:
-                    structs = parser._parse_xml_struct(parser.tool_buffer)
-                    args = {}
-                    for s in structs:
-                        if s["index"] == tc["index"]:
-                            args = s["arguments"]
-                            break
-                    tool_calls.append({
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": json.dumps(args)
-                        }
-                    })
-            save_session(messages, None, final_session_id, final_parent_id, tool_calls=tool_calls)
+                })
+            yield {"type": "tool_calls", "calls": formatted_calls}
+            yield {"type": "finish_reason", "reason": "tool_calls"}
+            
+            if final_session_id and final_parent_id:
+                save_session(messages, cleaned, final_session_id, final_parent_id, tool_calls=tool_calls)
         else:
+            if final_session_id and final_parent_id:
+                save_session(messages, accumulated_content, final_session_id, final_parent_id)
+    else:
+        if final_session_id and final_parent_id:
             save_session(messages, accumulated_content, final_session_id, final_parent_id)
 
 def format_chunk(item):
