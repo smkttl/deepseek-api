@@ -10,6 +10,8 @@ This project reverse-engineered the Web Interface of DeepSeek at [it's official 
 - Lightweight and easy to integrate.
 - Provides Markdown syntax for AI outputs.
 - Supports both DeepSeek V3 (fast) and R1 (reasoning with extended thinking) models.
+- **OpenAI-Compatible Function Calling**: Support for tools/functions in both streaming and non-streaming modes.
+- **Stateful Multi-Turn Conversations**: Thread-safe hybrid session caching (`(chat_session_id, parent_message_id)`) and transcript fallback mechanism to support seamless multi-turn conversations.
 
 ## Authentication
 
@@ -60,10 +62,37 @@ python main.py
 
 ### Option 2: OpenAI-Compatible Server
 
-Start the HTTP server:
+The server is built with **FastAPI** and **Uvicorn** for maximum asynchronous performance, robustness, and production readiness.
+
+#### Running with python directly:
 ```bash
 python server.py --host 0.0.0.0 --port 8000
 ```
+
+#### Running with uv (highly recommended for performance):
+```bash
+uv run python server.py --host 0.0.0.0 --port 8000
+```
+
+#### Running with Docker & Docker Compose:
+To run using Docker, first copy the example environment file:
+```bash
+cp .env.example .env
+```
+And customize `DS_SESSION_ID` and `AUTHORIZATION_TOKEN`. Then build and start the service:
+```bash
+docker compose up -d
+```
+Check running logs:
+```bash
+docker compose logs -f
+```
+Stop the service:
+```bash
+docker compose down
+```
+The compose config mounts a bind volume to `/app` for instant code changes, while isolating the `.venv` directory to prevent OS-level virtual environment conflicts.
+
 
 Then use it with any OpenAI-compatible client:
 
@@ -80,6 +109,30 @@ curl http://localhost:8000/v1/chat/completions \
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "deepseek-r1", "messages": [{"role": "user", "content": "Hello!"}]}'
+
+# Chat completion with tools / function calling (non-streaming or streaming)
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v3",
+    "messages": [{"role": "user", "content": "What is the weather in Paris, France right now?"}],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get current weather details for a given location",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {"type": "string"}
+            },
+            "required": ["location"]
+          }
+        }
+      }
+    ]
+  }'
 ```
 
 **Supported models:**
