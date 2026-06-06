@@ -283,3 +283,18 @@ class DeepSeekChat:
         except Exception as e:
             print(backtrace())
             return {"ok": False, "content": str(e)}
+
+    def delete_all_sessions(self):
+        url = f"{self.base_url}/api/v0/chat_session/delete_all"
+        headers = self.headers.copy()
+        headers["Referer"] = f"{self.base_url}/"
+        headers["referrer"] = f"{self.base_url}/"
+        try:
+            response = self.session.post(url, headers=headers, timeout=30)
+            if response.status_code == 200:
+                result = response.json()
+                return result.get("code") == 0
+            return False
+        except Exception as e:
+            print(f"Error deleting chat sessions: {e}")
+            return False

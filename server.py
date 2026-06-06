@@ -294,6 +294,21 @@ def chat_non_streaming(messages, model_type="default", thinking_enabled=True, to
         prompt = extract_prompt(messages, tools)
         
     res = chat.send_message(prompt, printing=False, thinking_enabled=thinking_enabled, search_enabled=False, model_type=model_type)
+    chat.delete_all_sessions()
+    
+    if not res or not res.get("ok"):
+        error_content = str(res.get("content") if res else "")
+        if "invalid chat session id" in error_content:
+            prefix = messages[:-1]
+            prefix_hash = get_messages_hash(prefix)
+            with cache_lock:
+                session_cache.pop(prefix_hash, None)
+            chat.chat_session_id = None
+            chat.parent_message_id = None
+            prompt = extract_prompt(messages, tools)
+            res = chat.send_message(prompt, printing=False, thinking_enabled=thinking_enabled, search_enabled=False, model_type=model_type)
+            chat.delete_all_sessions()
+            
     if res and res.get("ok"):
         content = res.get("content", {})
         response_text = content.get("response", "")
@@ -369,10 +384,24 @@ def chat_streaming(messages, model_type="default", thinking_enabled=True, tools=
             res = chat.send_message(prompt, printing=on_token, thinking_enabled=thinking_enabled, search_enabled=False, model_type=model_type)
             if not res or not res.get("ok"):
                 error_msg = res.get("content") if res else "Unknown error"
-                q.put(("error", f"Error: {error_msg}"))
+                if "invalid chat session id" in str(error_msg):
+                    prefix = messages[:-1]
+                    prefix_hash = get_messages_hash(prefix)
+                    with cache_lock:
+                        session_cache.pop(prefix_hash, None)
+                    chat.chat_session_id = None
+                    chat.parent_message_id = None
+                    fallback_prompt = extract_prompt(messages, tools)
+                    res = chat.send_message(fallback_prompt, printing=on_token, thinking_enabled=thinking_enabled, search_enabled=False, model_type=model_type)
+                    if not res or not res.get("ok"):
+                        error_msg = res.get("content") if res else "Unknown error"
+                        q.put(("error", f"Error: {error_msg}"))
+                else:
+                    q.put(("error", f"Error: {error_msg}"))
         except Exception as e:
             q.put(("error", str(e)))
         finally:
+            chat.delete_all_sessions()
             q.put(("done_session", (chat.chat_session_id, chat.parent_message_id)))
             q.put(None)
             
