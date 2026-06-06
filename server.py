@@ -14,10 +14,12 @@ import queue
 import threading
 import hashlib
 from io import StringIO
-from flask import Flask, request, jsonify, Response, stream_with_context, render_template
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.concurrency import run_in_threadpool
 from DeepSeekAPI import DeepSeekChat
 
-app = Flask(__name__)
+app = FastAPI(title="DeepSeek API Server")
 
 # Thread-safe multi-turn session cache
 session_cache = {}
@@ -464,13 +466,17 @@ def chat_streaming(messages, model_type="default", thinking_enabled=True, tools=
         else:
             save_session(messages, accumulated_content, final_session_id, final_parent_id)
 
-@app.route("/", methods=["GET"])
-def index():
-    return render_template("index.html")
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    try:
+        with open("templates/index.html", "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        return f"Error loading index.html: {e}"
 
-@app.route("/v1/chat/completions", methods=["POST"])
-def chat_completions():
-    data = request.json
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    data = await request.json()
     
     messages = data.get("messages", [])
     stream = data.get("stream", False)
@@ -483,16 +489,17 @@ def chat_completions():
     model_type, thinking_enabled = get_model_config(model)
     
     if stream:
-        return Response(
-            stream_with_context(chat_streaming(messages, model_type, thinking_enabled, tools)),
-            mimetype='text/event-stream',
+        return StreamingResponse(
+            chat_streaming(messages, model_type, thinking_enabled, tools),
+            media_type='text/event-stream',
             headers={
                 'Cache-Control': 'no-cache',
                 'Connection': 'keep-alive',
             }
         )
     else:
-        result = chat_non_streaming(messages, model_type, thinking_enabled, tools)
+        # Run chat_non_streaming in threadpool to avoid blocking main event loop
+        result = await run_in_threadpool(chat_non_streaming, messages, model_type, thinking_enabled, tools)
         
         message_dict = {
             "role": "assistant",
@@ -503,7 +510,7 @@ def chat_completions():
             
         content_len = len(result.get("content").split()) if result.get("content") else 0
         
-        return jsonify({
+        return JSONResponse({
             "id": f"chatcmpl-{int(time.time())}",
             "object": "chat.completion",
             "created": int(time.time()),
@@ -520,9 +527,9 @@ def chat_completions():
             }
         })
 
-@app.route("/v1/models", methods=["GET"])
-def list_models():
-    return jsonify({
+@app.get("/v1/models")
+async def list_models():
+    return {
         "object": "list",
         "data": [
             {
@@ -554,18 +561,19 @@ def list_models():
                 "description": "DeepSeek R4 - Expert reasoning model with extended thinking"
             }
         ]
-    })
+    }
 
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok"})
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 if __name__ == "__main__":
     import argparse
+    import uvicorn
     parser = argparse.ArgumentParser(description="DeepSeek API Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind")
     args = parser.parse_args()
     
     print(f"Starting DeepSeek API Server on {args.host}:{args.port}")
-    app.run(host=args.host, port=args.port)
+    uvicorn.run(app, host=args.host, port=args.port)

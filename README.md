@@ -62,9 +62,16 @@ python main.py
 
 ### Option 2: OpenAI-Compatible Server
 
-Start the HTTP server:
+The server is built with **FastAPI** and **Uvicorn** for maximum asynchronous performance, robustness, and production readiness.
+
+#### Running with python directly:
 ```bash
 python server.py --host 0.0.0.0 --port 8000
+```
+
+#### Running with uv (highly recommended for performance):
+```bash
+uv run python server.py --host 0.0.0.0 --port 8000
 ```
 
 Then use it with any OpenAI-compatible client:

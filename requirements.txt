@@ -6,3 +6,6 @@ term-image
 wcwidth
 toml
 flask
+fastapi
+uvicorn
+httpx

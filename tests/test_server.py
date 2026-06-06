@@ -7,6 +7,7 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from server import app
+from fastapi.testclient import TestClient
 
 class TestDeepSeekServer(unittest.TestCase):
     @classmethod
@@ -15,15 +16,14 @@ class TestDeepSeekServer(unittest.TestCase):
         if not os.path.exists(cls.tokens_path):
             raise unittest.SkipTest(f"Tokens file not found at {cls.tokens_path}. Skipping integration tests.")
         
-        # Configure app for testing
-        app.config["TESTING"] = True
-        cls.client = app.test_client()
+        # Configure FastAPI TestClient
+        cls.client = TestClient(app)
 
     def test_list_models(self):
         """Test GET /v1/models"""
         response = self.client.get("/v1/models")
         self.assertEqual(response.status_code, 200)
-        data = response.get_json()
+        data = response.json()
         self.assertEqual(data["object"], "list")
         model_ids = [m["id"] for m in data["data"]]
         self.assertIn("deepseek-v3", model_ids)
@@ -35,13 +35,13 @@ class TestDeepSeekServer(unittest.TestCase):
         """Test GET /health"""
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json(), {"status": "ok"})
+        self.assertEqual(response.json(), {"status": "ok"})
 
     def test_index_page(self):
         """Test GET / (web UI root)"""
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"<!DOCTYPE html>", response.data)
+        self.assertIn(b"<!DOCTYPE html>", response.content)
 
     def test_chat_completions_non_streaming_v3(self):
         """Test POST /v1/chat/completions (non-streaming, deepseek-v3)"""
@@ -50,11 +50,9 @@ class TestDeepSeekServer(unittest.TestCase):
             "messages": [{"role": "user", "content": "Say hello"}],
             "stream": False
         }
-        response = self.client.post("/v1/chat/completions", 
-                                    data=json.dumps(payload),
-                                    content_type="application/json")
+        response = self.client.post("/v1/chat/completions", json=payload)
         self.assertEqual(response.status_code, 200)
-        data = response.get_json()
+        data = response.json()
         self.assertEqual(data["object"], "chat.completion")
         self.assertEqual(data["model"], "deepseek-v3")
         self.assertTrue(len(data["choices"]) > 0)
@@ -69,32 +67,33 @@ class TestDeepSeekServer(unittest.TestCase):
             "messages": [{"role": "user", "content": "Say hello"}],
             "stream": True
         }
-        response = self.client.post("/v1/chat/completions", 
-                                    data=json.dumps(payload),
-                                    content_type="application/json")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.mimetype, "text/event-stream")
         
-        # Read the stream lines
-        has_reasoning = False
-        has_content = False
-        
-        for line in response.response:
-            line_str = line.decode("utf-8").strip()
-            if not line_str or line_str == "data: [DONE]":
-                continue
-            if line_str.startswith("data: "):
-                data = json.loads(line_str[6:])
-                delta = data["choices"][0]["delta"]
-                if "reasoning_content" in delta:
-                    has_reasoning = True
-                    print(delta["reasoning_content"], end="", flush=True)
-                if "content" in delta:
-                    has_content = True
-                    print(delta["content"], end="", flush=True)
-                    
-        print()
-        self.assertTrue(has_content or has_reasoning, "Streaming returned no tokens.")
+        with self.client.stream("POST", "/v1/chat/completions", json=payload) as response:
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("text/event-stream", response.headers.get("content-type", ""))
+            
+            # Read the stream lines
+            has_reasoning = False
+            has_content = False
+            
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                line_str = line.strip()
+                if not line_str or line_str == "data: [DONE]":
+                    continue
+                if line_str.startswith("data: "):
+                    data = json.loads(line_str[6:])
+                    delta = data["choices"][0]["delta"]
+                    if "reasoning_content" in delta:
+                        has_reasoning = True
+                        print(delta["reasoning_content"], end="", flush=True)
+                    if "content" in delta:
+                        has_content = True
+                        print(delta["content"], end="", flush=True)
+                        
+            print()
+            self.assertTrue(has_content or has_reasoning, "Streaming returned no tokens.")
 
     def test_chat_completions_system_prompt_v3(self):
         """Test POST /v1/chat/completions with system prompt (deepseek-v3)"""
@@ -106,11 +105,9 @@ class TestDeepSeekServer(unittest.TestCase):
             ],
             "stream": False
         }
-        response = self.client.post("/v1/chat/completions", 
-                                    data=json.dumps(payload),
-                                    content_type="application/json")
+        response = self.client.post("/v1/chat/completions", json=payload)
         self.assertEqual(response.status_code, 200)
-        data = response.get_json()
+        data = response.json()
         self.assertEqual(data["object"], "chat.completion")
         self.assertEqual(data["model"], "deepseek-v3")
         self.assertTrue(len(data["choices"]) > 0)
@@ -151,11 +148,9 @@ class TestDeepSeekServer(unittest.TestCase):
             "tools": tools,
             "stream": False
         }
-        response = self.client.post("/v1/chat/completions", 
-                                    data=json.dumps(payload),
-                                    content_type="application/json")
+        response = self.client.post("/v1/chat/completions", json=payload)
         self.assertEqual(response.status_code, 200)
-        data = response.get_json()
+        data = response.json()
         print("\nFunction Calling Non-Streaming Response:", json.dumps(data, indent=2))
         self.assertEqual(data["object"], "chat.completion")
         self.assertEqual(data["choices"][0]["finish_reason"], "tool_calls")
@@ -198,45 +193,46 @@ class TestDeepSeekServer(unittest.TestCase):
             "tools": tools,
             "stream": True
         }
-        response = self.client.post("/v1/chat/completions", 
-                                    data=json.dumps(payload),
-                                    content_type="application/json")
-        self.assertEqual(response.status_code, 200)
         
-        tool_calls = []
-        finish_reason = None
-        
-        for line in response.response:
-            line_str = line.decode("utf-8").strip()
-            if not line_str or line_str == "data: [DONE]":
-                continue
-            if line_str.startswith("data: "):
-                data = json.loads(line_str[6:])
-                choice = data["choices"][0]
-                delta = choice["delta"]
-                if "tool_calls" in delta:
-                    tool_calls.append(delta["tool_calls"])
-                if choice.get("finish_reason"):
-                    finish_reason = choice["finish_reason"]
-                    
-        print("\nFunction Calling Streaming tool_calls chunks:", tool_calls)
-        self.assertEqual(finish_reason, "tool_calls")
-        self.assertTrue(len(tool_calls) > 0)
-        
-        name = ""
-        arguments = ""
-        for tc_list in tool_calls:
-            for tc in tc_list:
-                if "function" in tc:
-                    if "name" in tc["function"]:
-                        name = tc["function"]["name"]
-                    if "arguments" in tc["function"]:
-                        arguments += tc["function"]["arguments"]
+        with self.client.stream("POST", "/v1/chat/completions", json=payload) as response:
+            self.assertEqual(response.status_code, 200)
+            
+            tool_calls = []
+            finish_reason = None
+            
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                line_str = line.strip()
+                if not line_str or line_str == "data: [DONE]":
+                    continue
+                if line_str.startswith("data: "):
+                    data = json.loads(line_str[6:])
+                    choice = data["choices"][0]
+                    delta = choice["delta"]
+                    if "tool_calls" in delta:
+                        tool_calls.append(delta["tool_calls"])
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
                         
-        self.assertEqual(name, "get_weather")
-        args = json.loads(arguments)
-        self.assertIn("location", args)
-        self.assertTrue("paris" in args["location"].lower())
+            print("\nFunction Calling Streaming tool_calls chunks:", tool_calls)
+            self.assertEqual(finish_reason, "tool_calls")
+            self.assertTrue(len(tool_calls) > 0)
+            
+            name = ""
+            arguments = ""
+            for tc_list in tool_calls:
+                for tc in tc_list:
+                    if "function" in tc:
+                        if "name" in tc["function"]:
+                            name = tc["function"]["name"]
+                        if "arguments" in tc["function"]:
+                            arguments += tc["function"]["arguments"]
+                            
+            self.assertEqual(name, "get_weather")
+            args = json.loads(arguments)
+            self.assertIn("location", args)
+            self.assertTrue("paris" in args["location"].lower())
 
     def test_chat_completions_multi_turn(self):
         """Test POST /v1/chat/completions multi-turn conversation caching and fallback"""
@@ -246,11 +242,9 @@ class TestDeepSeekServer(unittest.TestCase):
             "messages": [{"role": "user", "content": "My favorite color is green. Please remember it."}],
             "stream": False
         }
-        response1 = self.client.post("/v1/chat/completions", 
-                                     data=json.dumps(payload1),
-                                     content_type="application/json")
+        response1 = self.client.post("/v1/chat/completions", json=payload1)
         self.assertEqual(response1.status_code, 200)
-        data1 = response1.get_json()
+        data1 = response1.json()
         content1 = data1["choices"][0]["message"]["content"]
         print("\nMulti-turn Turn 1 Response:", content1)
         
@@ -268,11 +262,9 @@ class TestDeepSeekServer(unittest.TestCase):
             ],
             "stream": False
         }
-        response2 = self.client.post("/v1/chat/completions", 
-                                     data=json.dumps(payload2),
-                                     content_type="application/json")
+        response2 = self.client.post("/v1/chat/completions", json=payload2)
         self.assertEqual(response2.status_code, 200)
-        data2 = response2.get_json()
+        data2 = response2.json()
         content2 = data2["choices"][0]["message"]["content"]
         print("Multi-turn Turn 2 Response:", content2)
         
