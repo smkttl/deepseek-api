@@ -49,7 +49,10 @@ class DeepSeekChat:
         self.parent_message_id = None
     def create_chat_session(self):
         url=f"{self.base_url}/api/v0/chat_session/create"
-        response = self.session.post(url,headers=self.headers,data="{}",timeout=30)
+        headers=self.headers.copy()
+        headers["referer"]=f"{self.base_url}/"
+        headers["referrer"]=f"{self.base_url}/"
+        response = self.session.post(url,headers=headers,data="{}",timeout=30)
         if response.status_code==200:
             result = response.json()
             if result.get("code")==0:
@@ -70,6 +73,9 @@ class DeepSeekChat:
         if self.chat_session_id:
             headers["referer"]=f"{self.base_url}/a/chat/s/{self.chat_session_id}"
             headers["referrer"]=f"{self.base_url}/a/chat/s/{self.chat_session_id}"
+        else:
+            headers["referer"]=f"{self.base_url}/"
+            headers["referrer"]=f"{self.base_url}/"
         response=self.session.post(url,headers=headers,data=json.dumps(data),timeout=30)
         if response.status_code == 200:
             result=response.json()
@@ -122,6 +128,9 @@ class DeepSeekChat:
                 if self.chat_session_id:
                     headers["referer"] = f"{self.base_url}/a/chat/s/{self.chat_session_id}"
                     headers["referrer"] = f"{self.base_url}/a/chat/s/{self.chat_session_id}"
+                else:
+                    headers["referer"] = f"{self.base_url}/"
+                    headers["referrer"] = f"{self.base_url}/"
                 data = {
                     "chat_session_id": self.chat_session_id,
                     "parent_message_id": self.parent_message_id,

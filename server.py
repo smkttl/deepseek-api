@@ -86,14 +86,20 @@ def get_model_config(model: str):
 class StreamingToolParser:
     def __init__(self):
         self.in_tool_calls = False
+        self.mode = None # "json" or "xml"
         self.normal_buffer = ""
         self.tool_buffer = ""
+        self.done = False
+        
+        # JSON specific state
         self.yielded_name = False
         self.tool_call_id = f"call_{int(time.time())}"
         self.arg_start_idx = -1
         self.arg_yielded_len = 0
         self.brace_count = 0
-        self.done = False
+        
+        # XML specific state
+        self.xml_yielded_calls = [] # list of dict: {"index": idx, "id": call_id, "name": name, "yielded_len": 0}
 
     def feed(self, chunk):
         if self.done:
@@ -101,26 +107,37 @@ class StreamingToolParser:
             
         if not self.in_tool_calls:
             self.normal_buffer += chunk
+            
+            # Check for JSON format start
             if "[tool_calls]" in self.normal_buffer:
                 parts = self.normal_buffer.split("[tool_calls]", 1)
                 normal_delta = parts[0]
                 self.in_tool_calls = True
+                self.mode = "json"
                 self.normal_buffer = ""
                 rest = parts[1]
-                tool_res = self._feed_tool(rest)
-                if isinstance(tool_res, tuple):
-                    tool_delta, finish_reason, after_normal = tool_res
-                    return normal_delta + after_normal, tool_delta, finish_reason
-                else:
-                    return normal_delta, tool_res, None
-            else:
-                tag = "[tool_calls]"
-                hold_len = 0
-                for i in range(1, len(tag)):
-                    suffix = self.normal_buffer[-i:]
-                    if tag.startswith(suffix):
-                        hold_len = i
+                return self._feed_json(rest, normal_delta)
                 
+            # Check for XML format start
+            elif "<function_calls>" in self.normal_buffer or "<invoke" in self.normal_buffer:
+                tag = "<function_calls>" if "<function_calls>" in self.normal_buffer else "<invoke"
+                parts = self.normal_buffer.split(tag, 1)
+                normal_delta = parts[0]
+                self.in_tool_calls = True
+                self.mode = "xml"
+                self.normal_buffer = ""
+                rest = tag + parts[1]
+                return self._feed_xml(rest, normal_delta)
+                
+            else:
+                tags = ["[tool_calls]", "<function_calls>", "<invoke"]
+                hold_len = 0
+                for tag in tags:
+                    for i in range(1, len(tag)):
+                        suffix = self.normal_buffer[-i:]
+                        if tag.startswith(suffix):
+                            hold_len = max(hold_len, i)
+                            
                 if hold_len > 0:
                     yield_str = self.normal_buffer[:-hold_len]
                     self.normal_buffer = self.normal_buffer[-hold_len:]
@@ -130,14 +147,20 @@ class StreamingToolParser:
                     self.normal_buffer = ""
                     return yield_str, None, None
         else:
-            tool_res = self._feed_tool(chunk)
-            if isinstance(tool_res, tuple):
-                tool_delta, finish_reason, after_normal = tool_res
-                return after_normal, tool_delta, finish_reason
+            if self.mode == "json":
+                return self._feed_json(chunk, "")
             else:
-                return "", tool_res, None
+                return self._feed_xml(chunk, "")
 
-    def _feed_tool(self, chunk):
+    def _feed_json(self, chunk, normal_prefix):
+        tool_res = self._feed_tool_json(chunk)
+        if isinstance(tool_res, tuple):
+            tool_delta, finish_reason, after_normal = tool_res
+            return normal_prefix + after_normal, tool_delta, finish_reason
+        else:
+            return normal_prefix, tool_res, None
+
+    def _feed_tool_json(self, chunk):
         self.tool_buffer += chunk
         
         if "[/tool_calls]" in self.tool_buffer:
@@ -145,7 +168,7 @@ class StreamingToolParser:
             tool_content = parts[0]
             self.done = True
             self.tool_buffer = tool_content
-            tool_delta = self._parse_tool_delta()
+            tool_delta = self._parse_tool_delta_json()
             if tool_delta is None:
                 tool_delta = []
             normal_delta = parts[1] if len(parts) > 1 else ""
@@ -159,11 +182,11 @@ class StreamingToolParser:
                     hold_len = i
             if hold_len > 0:
                 active_content = self.tool_buffer[:-hold_len]
-                return self._parse_tool_delta(limit=len(active_content))
+                return self._parse_tool_delta_json(limit=len(active_content))
             else:
-                return self._parse_tool_delta()
+                return self._parse_tool_delta_json()
 
-    def _parse_tool_delta(self, limit=None):
+    def _parse_tool_delta_json(self, limit=None):
         content_to_parse = self.tool_buffer if limit is None else self.tool_buffer[:limit]
         tool_delta = []
         
@@ -215,6 +238,184 @@ class StreamingToolParser:
                     
         return tool_delta if tool_delta else None
 
+    def _feed_xml(self, chunk, normal_prefix):
+        self.tool_buffer += chunk
+        
+        # Check if XML block is closed
+        if "</function_calls>" in self.tool_buffer:
+            parts = self.tool_buffer.split("</function_calls>", 1)
+            active_xml = parts[0]
+            self.done = True
+            tool_delta = self._parse_xml_delta(active_xml)
+            normal_suffix = parts[1] if len(parts) > 1 else ""
+            return normal_prefix + normal_suffix, tool_delta, "tool_calls"
+            
+        tool_delta = self._parse_xml_delta(self.tool_buffer)
+        return normal_prefix, tool_delta, None
+
+    def _parse_xml_struct(self, buffer):
+        tool_calls = []
+        parts = buffer.split("<invoke")
+        for idx, part in enumerate(parts[1:]):
+            match_name = re.search(r'name\s*=\s*["\']([^"\']+)["\']\s*>', part)
+            if not match_name:
+                continue
+            name = match_name.group(1)
+            
+            params = {}
+            param_matches = re.finditer(r'<parameter\s+name=["\']([^"\']+)["\'][^>]*>([^<]*)</parameter>', part)
+            for pm in param_matches:
+                p_name = pm.group(1)
+                p_val = pm.group(2)
+                params[p_name] = p_val
+                
+            is_complete = "</invoke>" in part
+            
+            # Active parameter (partially typed)
+            if not is_complete:
+                active_match = re.search(r'<parameter\s+name=["\']([^"\']+)["\'][^>]*>([^<]*)$', part)
+                if active_match:
+                    p_name = active_match.group(1)
+                    p_val = active_match.group(2)
+                    params[p_name] = p_val
+                    
+            tool_calls.append({
+                "index": idx,
+                "name": name,
+                "arguments": params,
+                "is_complete": is_complete
+            })
+        return tool_calls
+
+    def _parse_xml_delta(self, buffer):
+        tool_delta = []
+        parts = buffer.split("<invoke")
+        for idx, part in enumerate(parts[1:]):
+            match_name = re.search(r'name\s*=\s*["\']([^"\']+)["\']\s*>', part)
+            if not match_name:
+                continue
+            name = match_name.group(1)
+            
+            tracked = None
+            for tc in self.xml_yielded_calls:
+                if tc["index"] == idx:
+                    tracked = tc
+                    break
+            if not tracked:
+                call_id = f"call_{name}_{idx}_{int(time.time())}"
+                tracked = {
+                    "index": idx,
+                    "id": call_id,
+                    "name": name,
+                    "started_args": False,
+                    "yielded_params": {},
+                    "completed_params_order": [],
+                    "active_param": None,
+                    "closed": False
+                }
+                self.xml_yielded_calls.append(tracked)
+                tool_delta.append({
+                    "index": idx,
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": ""
+                    }
+                })
+                
+            args_delta = ""
+            if not tracked["started_args"]:
+                args_delta += "{"
+                tracked["started_args"] = True
+                
+            param_matches = list(re.finditer(r'<parameter\s+name=["\']([^"\']+)["\'][^>]*>([^<]*)</parameter>', part))
+            completed_names = []
+            completed_values = {}
+            for pm in param_matches:
+                p_name = pm.group(1)
+                p_val = pm.group(2)
+                completed_names.append(p_name)
+                completed_values[p_name] = p_val
+                
+            active_name = None
+            active_val = ""
+            is_invoke_complete = "</invoke>" in part
+            
+            if not is_invoke_complete:
+                active_match = re.search(r'<parameter\s+name=["\']([^"\']+)["\'][^>]*>([^<]*)$', part)
+                if active_match:
+                    active_name = active_match.group(1)
+                    active_val = active_match.group(2)
+                    
+            for p_name in completed_names:
+                p_val = completed_values[p_name]
+                if p_name not in tracked["yielded_params"]:
+                    tracked["yielded_params"][p_name] = {
+                        "started": False,
+                        "completed": False,
+                        "yielded_val": ""
+                    }
+                
+                p_state = tracked["yielded_params"][p_name]
+                if not p_state["completed"]:
+                    p_delta = ""
+                    if not p_state["started"]:
+                        if tracked["completed_params_order"]:
+                            p_delta += ", "
+                        p_delta += f'"{p_name}": "'
+                        p_state["started"] = True
+                        if p_name not in tracked["completed_params_order"]:
+                            tracked["completed_params_order"].append(p_name)
+                            
+                    val_to_yield = p_val[len(p_state["yielded_val"]):]
+                    p_delta += json.dumps(val_to_yield)[1:-1]
+                    p_state["yielded_val"] = p_val
+                    p_delta += '"'
+                    p_state["completed"] = True
+                    args_delta += p_delta
+                    
+            if active_name:
+                if active_name not in tracked["yielded_params"]:
+                    tracked["yielded_params"][active_name] = {
+                        "started": False,
+                        "completed": False,
+                        "yielded_val": ""
+                    }
+                p_state = tracked["yielded_params"][active_name]
+                if not p_state["completed"]:
+                    p_delta = ""
+                    if not p_state["started"]:
+                        if tracked["completed_params_order"]:
+                            p_delta += ", "
+                        p_delta += f'"{active_name}": "'
+                        p_state["started"] = True
+                        if active_name not in tracked["completed_params_order"]:
+                            tracked["completed_params_order"].append(active_name)
+                            
+                    val_to_yield = active_val[len(p_state["yielded_val"]):]
+                    p_delta += json.dumps(val_to_yield)[1:-1]
+                    p_state["yielded_val"] = active_val
+                    args_delta += p_delta
+                    
+            if is_invoke_complete and not tracked["closed"]:
+                for p_name, p_state in tracked["yielded_params"].items():
+                    if p_state["started"] and not p_state["completed"]:
+                        args_delta += '"'
+                        p_state["completed"] = True
+                args_delta += "}"
+                tracked["closed"] = True
+                
+            if args_delta:
+                tool_delta.append({
+                    "index": idx,
+                    "function": {
+                        "arguments": args_delta
+                    }
+                })
+                
+        return tool_delta if tool_delta else None
+
 def format_tool_instructions(tools):
     if not tools:
         return ""
@@ -230,25 +431,28 @@ def format_tool_instructions(tools):
 You have access to the following functions (tools) that you can call if needed:
 {tools_json}
 
-If you decide to call any function(s), you MUST wrap the function call(s) inside a `[tool_calls]` block.
-The content inside the `[tool_calls]` block MUST be a valid JSON array of objects, where each object has:
-- "name": string (the name of the function to call)
-- "arguments": object (the arguments to pass to the function)
+If you decide to call any function(s), you MUST use one of the following formats:
 
-Example output if you want to call a function:
+Format 1 (XML - preferred for agents):
+<function_calls>
+<invoke name="function_name">
+<parameter name="param1">value1</parameter>
+</invoke>
+</function_calls>
+
+Format 2 (JSON):
 [tool_calls]
 [
   {{
-    "name": "get_current_weather",
+    "name": "function_name",
     "arguments": {{
-      "location": "San Francisco, CA"
+      "param1": "value1"
     }}
   }}
 ]
 [/tool_calls]
 
-If you call a function, do not output any other text or reasoning inside the `[tool_calls]` block. You may provide regular response text outside of the block if necessary, but keep it brief.
-If no function calls are needed, respond normally without any `[tool_calls]` tag.
+If you call a function, do not output any other text or reasoning inside the tags or blocks. You may provide regular response text outside of the block/tags.
 """
     return instructions
 
@@ -261,18 +465,20 @@ def extract_prompt(messages, tools=None):
         user_message = chat_messages[-1]["content"] if chat_messages else ""
     else:
         formatted_turns = []
-        for m in chat_messages:
+        for m in chat_messages[:-1]:
             role = m.get("role")
             content = m.get("content") or ""
             if role == "assistant" and m.get("tool_calls"):
-                formatted_turns.append(f"Assistant (Tool Calls): {json.dumps(m['tool_calls'])}")
+                formatted_turns.append(f"[Assistant (Tool Calls)]: {json.dumps(m['tool_calls'])}")
             elif role == "tool":
-                formatted_turns.append(f"Tool Response ({m.get('name', '')}): {content}")
+                formatted_turns.append(f"[Tool Response ({m.get('name', '')})]: {content}")
             elif role == "user":
-                formatted_turns.append(f"User: {content}")
+                formatted_turns.append(f"[User]: {content}")
             elif role == "assistant":
-                formatted_turns.append(f"Assistant: {content}")
-        user_message = "\n\n".join(formatted_turns)
+                formatted_turns.append(f"[Assistant]: {content}")
+        history_str = "\n".join(formatted_turns)
+        last_msg = chat_messages[-1]["content"] if chat_messages else ""
+        user_message = f"Conversation History:\n{history_str}\n\n[User]: {last_msg}"
         
     system_prompt = "\n".join(system_messages) if system_messages else ""
     
@@ -284,8 +490,80 @@ def extract_prompt(messages, tools=None):
             system_prompt = tool_instructions
             
     if system_prompt:
-        return f"System Prompt: {system_prompt}\n\nUser Message: {user_message}"
+        return f"System Prompt:\n{system_prompt}\n\nUser Message:\n{user_message}"
     return user_message
+
+def extract_tool_calls_from_text(response_text, tools):
+    if not tools:
+        return False, None, response_text
+
+    # 1. Check for JSON [tool_calls] block
+    if "[tool_calls]" in response_text and "[/tool_calls]" in response_text:
+        parts = response_text.split("[tool_calls]", 1)
+        text_before = parts[0].strip()
+        rest = parts[1].split("[/tool_calls]", 1)
+        tool_json = rest[0].strip()
+        text_after = rest[1].strip() if len(rest) > 1 else ""
+        try:
+            tool_calls_raw = json.loads(tool_json)
+            tool_calls = []
+            for i, tc in enumerate(tool_calls_raw):
+                tool_calls.append({
+                    "id": f"call_{tc.get('name', '')}_{i}_{int(time.time())}",
+                    "type": "function",
+                    "function": {
+                        "name": tc.get("name"),
+                        "arguments": json.dumps(tc.get("arguments"))
+                    }
+                })
+            combined_content = (text_before + "\n" + text_after).strip()
+            return True, tool_calls, (combined_content if combined_content else None)
+        except Exception:
+            pass
+
+    # 2. Check for XML <function_calls> or <invoke block
+    if "<function_calls>" in response_text or "<invoke" in response_text:
+        tag_start = "<function_calls>" if "<function_calls>" in response_text else "<invoke"
+        parts = response_text.split(tag_start, 1)
+        text_before = parts[0].strip()
+        
+        tag_end = "</function_calls>" if "</function_calls>" in response_text else "</invoke>"
+        rest_parts = parts[1].split(tag_end, 1)
+        xml_content = tag_start + rest_parts[0] + tag_end
+        text_after = rest_parts[1].strip() if len(rest_parts) > 1 else ""
+        
+        try:
+            tool_calls = []
+            parts_inv = xml_content.split("<invoke")
+            for idx, part in enumerate(parts_inv[1:]):
+                match_name = re.search(r'name\s*=\s*["\']([^"\']+)["\']\s*>', part)
+                if not match_name:
+                    continue
+                name = match_name.group(1)
+                
+                params = {}
+                param_matches = re.finditer(r'<parameter\s+name=["\']([^"\']+)["\'][^>]*>([^<]*)</parameter>', part)
+                for pm in param_matches:
+                    p_name = pm.group(1)
+                    p_val = pm.group(2)
+                    params[p_name] = p_val
+                    
+                tool_calls.append({
+                    "id": f"call_{name}_{idx}_{int(time.time())}",
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(params)
+                    }
+                })
+                
+            if tool_calls:
+                combined_content = (text_before + "\n" + text_after).strip()
+                return True, tool_calls, (combined_content if combined_content else None)
+        except Exception:
+            pass
+
+    return False, None, response_text
 
 def chat_non_streaming(messages, model_type="default", thinking_enabled=True, tools=None):
     """Non-streaming chat"""
@@ -322,37 +600,12 @@ def chat_non_streaming(messages, model_type="default", thinking_enabled=True, to
         content = res.get("content", {})
         response_text = content.get("response", "")
         
-        is_tool_call = False
-        tool_calls = None
-        if tools and "[tool_calls]" in response_text and "[/tool_calls]" in response_text:
-            parts = response_text.split("[tool_calls]", 1)
-            text_before = parts[0].strip()
-            rest = parts[1].split("[/tool_calls]", 1)
-            tool_json = rest[0].strip()
-            text_after = rest[1].strip() if len(rest) > 1 else ""
-            
-            try:
-                tool_calls_raw = json.loads(tool_json)
-                tool_calls = []
-                for i, tc in enumerate(tool_calls_raw):
-                    tool_calls.append({
-                        "id": f"call_{tc.get('name', '')}_{i}",
-                        "type": "function",
-                        "function": {
-                            "name": tc.get("name"),
-                            "arguments": json.dumps(tc.get("arguments"))
-                        }
-                    })
-                is_tool_call = True
-                combined_content = (text_before + "\n" + text_after).strip()
-                response_text = combined_content if combined_content else None
-            except Exception:
-                pass
+        is_tool_call, tool_calls, final_content = extract_tool_calls_from_text(response_text, tools)
                 
         if is_tool_call:
-            save_session(messages, response_text, chat.chat_session_id, chat.parent_message_id, tool_calls=tool_calls)
+            save_session(messages, final_content, chat.chat_session_id, chat.parent_message_id, tool_calls=tool_calls)
             return {
-                "content": response_text,
+                "content": final_content,
                 "tool_calls": tool_calls,
                 "finish_reason": "tool_calls"
             }
@@ -453,14 +706,33 @@ def chat_streaming(messages, model_type="default", thinking_enabled=True, tools=
                 
     if final_session_id and final_parent_id:
         if parser and parser.done:
-            tool_calls = [{
-                "id": parser.tool_call_id,
-                "type": "function",
-                "function": {
-                    "name": parser.func_name,
-                    "arguments": parser.tool_buffer
-                }
-            }]
+            if parser.mode == "json":
+                tool_calls = [{
+                    "id": parser.tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": parser.func_name,
+                        "arguments": parser.tool_buffer
+                    }
+                }]
+            else:
+                # XML mode
+                tool_calls = []
+                for tc in parser.xml_yielded_calls:
+                    structs = parser._parse_xml_struct(parser.tool_buffer)
+                    args = {}
+                    for s in structs:
+                        if s["index"] == tc["index"]:
+                            args = s["arguments"]
+                            break
+                    tool_calls.append({
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(args)
+                        }
+                    })
             save_session(messages, None, final_session_id, final_parent_id, tool_calls=tool_calls)
         else:
             save_session(messages, accumulated_content, final_session_id, final_parent_id)
@@ -509,7 +781,6 @@ async def chat_completions(request: Request):
     tools = data.get("tools")
     model = data.get("model", "deepseek-v3")
     
-    # 100% OpenAI input parameter validations
     if not isinstance(messages, list):
         return JSONResponse({
             "error": {
@@ -530,7 +801,6 @@ async def chat_completions(request: Request):
             }
         }, status_code=400)
         
-    # Check for authorization tokens
     if not DS_SESSION_ID or not AUTHORIZATION_TOKEN:
         return JSONResponse({
             "error": {
@@ -541,7 +811,6 @@ async def chat_completions(request: Request):
             }
         }, status_code=401)
     
-    # Determine DeepSeek web model flags based on model name.
     model_type, thinking_enabled = get_model_config(model)
     
     if stream:
