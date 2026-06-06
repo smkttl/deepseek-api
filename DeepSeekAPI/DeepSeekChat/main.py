@@ -37,10 +37,10 @@ class DeepSeekChat:
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
-            "x-app-version": "20241129.1",
+            "x-app-version": "2.0.0",
             "x-client-locale": "zh_CN",
             "x-client-platform": "web",
-            "x-client-version": "1.5.0",
+            "x-client-version": "2.0.0",
             "x-debug-lite-model-channel": "prod",
             "x-debug-model-channel": "prod",
             "user-agent": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/142.0"
@@ -53,7 +53,11 @@ class DeepSeekChat:
         if response.status_code==200:
             result = response.json()
             if result.get("code")==0:
-                self.chat_session_id=result["data"]["biz_data"]["id"]
+                biz_data = result.get("data", {}).get("biz_data", {})
+                if "chat_session" in biz_data:
+                    self.chat_session_id = biz_data["chat_session"].get("id")
+                else:
+                    self.chat_session_id = biz_data.get("id")
                 return True
             else:
                 return False
@@ -64,6 +68,7 @@ class DeepSeekChat:
         data={"target_path":"/api/v0/chat/completion"}
         headers=self.headers.copy()
         if self.chat_session_id:
+            headers["referer"]=f"{self.base_url}/a/chat/s/{self.chat_session_id}"
             headers["referrer"]=f"{self.base_url}/a/chat/s/{self.chat_session_id}"
         response=self.session.post(url,headers=headers,data=json.dumps(data),timeout=30)
         if response.status_code == 200:
@@ -110,6 +115,7 @@ class DeepSeekChat:
         headers["x-ds-pow-response"] = pow_response
         headers["accept"] = "text/event-stream"
         if self.chat_session_id:
+            headers["referer"] = f"{self.base_url}/a/chat/s/{self.chat_session_id}"
             headers["referrer"] = f"{self.base_url}/a/chat/s/{self.chat_session_id}"
         data = {
             "chat_session_id": self.chat_session_id,
@@ -147,8 +153,15 @@ class DeepSeekChat:
                 thinktime=0
                 citation={}
                 sd_remains=""
-                def send_to_sd(text):
-                    print(text,end='',flush=True)
+                def send_to_sd(text, type_override=None):
+                    mode = type_override if type_override is not None else generate_mode
+                    if callable(printing):
+                        try:
+                            printing(mode, text)
+                        except TypeError:
+                            printing(text)
+                    elif printing:
+                        print(text,end='',flush=True)
                 def parse_output(data,line):
                     nonlocal event,think,respond,generate_mode,parid,msgid,thinktime
                     if not data:
@@ -184,6 +197,14 @@ class DeepSeekChat:
                         elif 'message_id' in data or 'parent_id' in data:
                             parid=data.get('parent_id',parid)
                             msgid=data.get('message_id',msgid)
+                            if 'fragments' in data and data['fragments']:
+                                if not generate_mode:
+                                    last_fragment = data['fragments'][-1]
+                                    if 'type' in last_fragment:
+                                        generate_mode = last_fragment['type']
+                                for frag in data['fragments']:
+                                    if 'content' in frag and frag.get('type') == generate_mode:
+                                        parse_output(frag['content'], line)
                         elif 'updated_at' in data and len(data)==1:
                             return #CURRENTLY no use of this value
                         elif 'p' in data:
@@ -192,7 +213,7 @@ class DeepSeekChat:
                                 parse_output(data['v'],line)
                             elif tp=='status':
                                 if printing:
-                                    send_to_sd('\n\n-----\n'+data['v'])
+                                    send_to_sd('\n\n-----\n'+data['v'], type_override='STATUS')
                             elif tp=='accumulated_token_usage':
                                 tokencount=data['v']
                             elif tp=='elapsed_secs':
@@ -206,7 +227,7 @@ class DeepSeekChat:
                         elif 'type' in data and data['type']:
                             if generate_mode!=data['type']:
                                 if printing:
-                                    send_to_sd(f"\n\n-----\nSTART {data['type']}\n")
+                                    send_to_sd(f"\n\n-----\nSTART {data['type']}\n", type_override='START_MODE')
                                 generate_mode=data['type']
                             if 'content' in data:
                                 parse_output(data['content'],line)
@@ -224,6 +245,8 @@ class DeepSeekChat:
                                     parse_output(data,line)
                                 elif event in ['finish','close']:
                                     pass
+                                elif event in ['toast', 'hint']:
+                                    raise Exception(data.get('content', f"Server {event} event received"))
                                 elif event=='title' and 'content' in data:
                                     title=data['content']
                                 elif event=='ready' and ('request_message_id' in data or 'response_message_id' in data):

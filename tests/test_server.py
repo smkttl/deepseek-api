@@ -1,0 +1,246 @@
+import os
+import sys
+import json
+import unittest
+
+# Ensure the root of the project is in python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from server import app
+
+class TestDeepSeekServer(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tokens_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../tokens"))
+        if not os.path.exists(cls.tokens_path):
+            raise unittest.SkipTest(f"Tokens file not found at {cls.tokens_path}. Skipping integration tests.")
+        
+        # Configure app for testing
+        app.config["TESTING"] = True
+        cls.client = app.test_client()
+
+    def test_list_models(self):
+        """Test GET /v1/models"""
+        response = self.client.get("/v1/models")
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data["object"], "list")
+        model_ids = [m["id"] for m in data["data"]]
+        self.assertIn("deepseek-v3", model_ids)
+        self.assertIn("deepseek-r1", model_ids)
+        self.assertIn("deepseek-v4", model_ids)
+        self.assertIn("deepseek-r4", model_ids)
+
+    def test_health(self):
+        """Test GET /health"""
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"status": "ok"})
+
+    def test_index_page(self):
+        """Test GET / (web UI root)"""
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"<!DOCTYPE html>", response.data)
+
+    def test_chat_completions_non_streaming_v3(self):
+        """Test POST /v1/chat/completions (non-streaming, deepseek-v3)"""
+        payload = {
+            "model": "deepseek-v3",
+            "messages": [{"role": "user", "content": "Say hello"}],
+            "stream": False
+        }
+        response = self.client.post("/v1/chat/completions", 
+                                    data=json.dumps(payload),
+                                    content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data["object"], "chat.completion")
+        self.assertEqual(data["model"], "deepseek-v3")
+        self.assertTrue(len(data["choices"]) > 0)
+        content = data["choices"][0]["message"]["content"]
+        self.assertIsNotNone(content)
+        print("\nServer Non-Streaming Response:", content)
+
+    def test_chat_completions_streaming_r1(self):
+        """Test POST /v1/chat/completions (streaming, deepseek-r1 with reasoning)"""
+        payload = {
+            "model": "deepseek-r1",
+            "messages": [{"role": "user", "content": "Say hello"}],
+            "stream": True
+        }
+        response = self.client.post("/v1/chat/completions", 
+                                    data=json.dumps(payload),
+                                    content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "text/event-stream")
+        
+        # Read the stream lines
+        has_reasoning = False
+        has_content = False
+        
+        for line in response.response:
+            line_str = line.decode("utf-8").strip()
+            if not line_str or line_str == "data: [DONE]":
+                continue
+            if line_str.startswith("data: "):
+                data = json.loads(line_str[6:])
+                delta = data["choices"][0]["delta"]
+                if "reasoning_content" in delta:
+                    has_reasoning = True
+                    print(delta["reasoning_content"], end="", flush=True)
+                if "content" in delta:
+                    has_content = True
+                    print(delta["content"], end="", flush=True)
+                    
+        print()
+        self.assertTrue(has_content or has_reasoning, "Streaming returned no tokens.")
+
+    def test_chat_completions_system_prompt_v3(self):
+        """Test POST /v1/chat/completions with system prompt (deepseek-v3)"""
+        payload = {
+            "model": "deepseek-v3",
+            "messages": [
+                {"role": "system", "content": "You are a pirate. Always start your response with 'AHoy!'"},
+                {"role": "user", "content": "Say hello"}
+            ],
+            "stream": False
+        }
+        response = self.client.post("/v1/chat/completions", 
+                                    data=json.dumps(payload),
+                                    content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data["object"], "chat.completion")
+        self.assertEqual(data["model"], "deepseek-v3")
+        self.assertTrue(len(data["choices"]) > 0)
+        content = data["choices"][0]["message"]["content"]
+        self.assertIsNotNone(content)
+        print("\nSystem Prompt Response:", content)
+        self.assertTrue(
+            any(w in content.lower() for w in ["ahoy", "pirate", "matey", "scallywag", "buccaneer", "seas", "oy!", "sea", "sail"]),
+            f"Model did not adhere to system prompt: {content}"
+        )
+
+    def test_chat_completions_function_calling_non_streaming(self):
+        """Test POST /v1/chat/completions with function calling (non-streaming, deepseek-v3)"""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather of a given location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "The city and state, e.g. San Francisco, CA"
+                            }
+                        },
+                        "required": ["location"]
+                    }
+                }
+            }
+        ]
+        payload = {
+            "model": "deepseek-v3",
+            "messages": [
+                {"role": "user", "content": "What is the weather in Paris, France right now?"}
+            ],
+            "tools": tools,
+            "stream": False
+        }
+        response = self.client.post("/v1/chat/completions", 
+                                    data=json.dumps(payload),
+                                    content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        print("\nFunction Calling Non-Streaming Response:", json.dumps(data, indent=2))
+        self.assertEqual(data["object"], "chat.completion")
+        self.assertEqual(data["choices"][0]["finish_reason"], "tool_calls")
+        message = data["choices"][0]["message"]
+        self.assertIn("tool_calls", message)
+        tool_calls = message["tool_calls"]
+        self.assertEqual(len(tool_calls), 1)
+        self.assertEqual(tool_calls[0]["function"]["name"], "get_weather")
+        
+        args = json.loads(tool_calls[0]["function"]["arguments"])
+        self.assertIn("location", args)
+        self.assertTrue("paris" in args["location"].lower())
+
+    def test_chat_completions_function_calling_streaming(self):
+        """Test POST /v1/chat/completions with function calling (streaming, deepseek-v3)"""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather of a given location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "The city and state, e.g. San Francisco, CA"
+                            }
+                        },
+                        "required": ["location"]
+                    }
+                }
+            }
+        ]
+        payload = {
+            "model": "deepseek-v3",
+            "messages": [
+                {"role": "user", "content": "What is the weather in Paris, France right now?"}
+            ],
+            "tools": tools,
+            "stream": True
+        }
+        response = self.client.post("/v1/chat/completions", 
+                                    data=json.dumps(payload),
+                                    content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        
+        tool_calls = []
+        finish_reason = None
+        
+        for line in response.response:
+            line_str = line.decode("utf-8").strip()
+            if not line_str or line_str == "data: [DONE]":
+                continue
+            if line_str.startswith("data: "):
+                data = json.loads(line_str[6:])
+                choice = data["choices"][0]
+                delta = choice["delta"]
+                if "tool_calls" in delta:
+                    tool_calls.append(delta["tool_calls"])
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+                    
+        print("\nFunction Calling Streaming tool_calls chunks:", tool_calls)
+        self.assertEqual(finish_reason, "tool_calls")
+        self.assertTrue(len(tool_calls) > 0)
+        
+        name = ""
+        arguments = ""
+        for tc_list in tool_calls:
+            for tc in tc_list:
+                if "function" in tc:
+                    if "name" in tc["function"]:
+                        name = tc["function"]["name"]
+                    if "arguments" in tc["function"]:
+                        arguments += tc["function"]["arguments"]
+                        
+        self.assertEqual(name, "get_weather")
+        args = json.loads(arguments)
+        self.assertIn("location", args)
+        self.assertTrue("paris" in args["location"].lower())
+
+    def tearDown(self):
+        import time
+        time.sleep(3)
+
+if __name__ == "__main__":
+    unittest.main()

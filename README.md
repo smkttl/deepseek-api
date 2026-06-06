@@ -10,6 +10,7 @@ This project reverse-engineered the Web Interface of DeepSeek at [it's official 
 - Lightweight and easy to integrate.
 - Provides Markdown syntax for AI outputs.
 - Supports both DeepSeek V3 (fast) and R1 (reasoning with extended thinking) models.
+- **OpenAI-Compatible Function Calling**: Support for tools/functions in both streaming and non-streaming modes.
 
 ## Authentication
 
@@ -80,6 +81,30 @@ curl http://localhost:8000/v1/chat/completions \
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "deepseek-r1", "messages": [{"role": "user", "content": "Hello!"}]}'
+
+# Chat completion with tools / function calling (non-streaming or streaming)
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v3",
+    "messages": [{"role": "user", "content": "What is the weather in Paris, France right now?"}],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get current weather details for a given location",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {"type": "string"}
+            },
+            "required": ["location"]
+          }
+        }
+      }
+    ]
+  }'
 ```
 
 **Supported models:**
