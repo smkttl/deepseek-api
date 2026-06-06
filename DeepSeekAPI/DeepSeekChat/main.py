@@ -101,58 +101,70 @@ class DeepSeekChat:
     def send_message(self,message,printing=None,thinking_enabled=False,search_enabled=False,model_type="default"):
         if model_type not in ("default", "expert"):
             return {"ok": False, "content": "model_type must be 'default' or 'expert'."}
-        if not self.chat_session_id:
-            if not self.create_chat_session():
-                return {"ok": False, "content": "Can't create chat session."}
-        challenge_data = self.create_pow_challenge()
-        if not challenge_data:
-            return {"ok": False, "content": "Can't create PoW challenge."}
-        value,pow_response = self.solve_pow_challenge(challenge_data)
-        if not value:
-            return {"ok": False, "content": "Can't solve PoW challenge."}
-        url = f"{self.base_url}/api/v0/chat/completion"
-        headers = self.headers.copy()
-        headers["x-ds-pow-response"] = pow_response
-        headers["accept"] = "text/event-stream"
-        if self.chat_session_id:
-            headers["referer"] = f"{self.base_url}/a/chat/s/{self.chat_session_id}"
-            headers["referrer"] = f"{self.base_url}/a/chat/s/{self.chat_session_id}"
-        data = {
-            "chat_session_id": self.chat_session_id,
-            "parent_message_id": self.parent_message_id,
-            "model_type": model_type,
-            "prompt": message,
-            "ref_file_ids": [],
-            "thinking_enabled": thinking_enabled,
-            "search_enabled": False,
-            "action": None,
-            "preempt": False
-        }
-        try:
-            response = self.session.post(
-                url,
-                headers=headers,
-                data=json.dumps(data),
-                timeout=60,
-                stream=True
-            )
-            if response.status_code == 200:
-                content_type=response.headers.get('content-type', '')
+
+        max_attempts = 5
+        last_error = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                if not self.chat_session_id:
+                    if not self.create_chat_session():
+                        raise Exception("Can't create chat session.")
+                challenge_data = self.create_pow_challenge()
+                if not challenge_data:
+                    raise Exception("Can't create PoW challenge.")
+                value,pow_response = self.solve_pow_challenge(challenge_data)
+                if not value:
+                    raise Exception("Can't solve PoW challenge.")
+                url = f"{self.base_url}/api/v0/chat/completion"
+                headers = self.headers.copy()
+                headers["x-ds-pow-response"] = pow_response
+                headers["accept"] = "text/event-stream"
+                if self.chat_session_id:
+                    headers["referer"] = f"{self.base_url}/a/chat/s/{self.chat_session_id}"
+                    headers["referrer"] = f"{self.base_url}/a/chat/s/{self.chat_session_id}"
+                data = {
+                    "chat_session_id": self.chat_session_id,
+                    "parent_message_id": self.parent_message_id,
+                    "model_type": model_type,
+                    "prompt": message,
+                    "ref_file_ids": [],
+                    "thinking_enabled": thinking_enabled,
+                    "search_enabled": False,
+                    "action": None,
+                    "preempt": False
+                }
+                
+                response = self.session.post(
+                    url,
+                    headers=headers,
+                    data=json.dumps(data),
+                    timeout=60,
+                    stream=True
+                )
+                
+                if response.status_code != 200:
+                    raise Exception(f"HTTP ERROR: {response.status_code}\n{response.text}")
+                
+                content_type = response.headers.get('content-type', '')
                 if not "text/event-stream" in content_type:
-                    full_content=b''
+                    full_content = b''
                     for chunk in response.iter_content(chunk_size=8192):
                         full_content += chunk
-                    return {"ok": False, "content": full_content}
-                event='UNKNOWN'#ready=preparing update_session=outputting title close
-                think=''
-                respond=''
-                generate_mode=''#THINK RESPONSE SEARCH TIP(This content is AI-generated... stuff)
-                parid,msgid,reqid,resid=None,None,None,None #suspect parid=reqid msgid=resid NOT SURE
-                tokencount=None
-                title=''
-                thinktime=0
-                citation={}
-                sd_remains=""
+                    # If this is an invalid session ID error, return it so the self-healing retry catches it
+                    if b"invalid chat session id" in full_content:
+                        return {"ok": False, "content": full_content}
+                    raise Exception(f"Unexpected non-stream content: {full_content}")
+                
+                event = 'UNKNOWN'
+                think = ''
+                respond = ''
+                generate_mode = ''
+                parid,msgid,reqid,resid = None,None,None,None
+                tokencount = None
+                title = ''
+                thinktime = 0
+                citation = {}
+                
                 def send_to_sd(text, type_override=None):
                     mode = type_override if type_override is not None else generate_mode
                     if callable(printing):
@@ -162,6 +174,7 @@ class DeepSeekChat:
                             printing(text)
                     elif printing:
                         print(text,end='',flush=True)
+                        
                 def parse_output(data,line):
                     nonlocal event,think,respond,generate_mode,parid,msgid,thinktime
                     if not data:
@@ -176,7 +189,7 @@ class DeepSeekChat:
                         elif generate_mode=='TIP':
                             pass
                         else:
-                            raise Exception(f"Unexptected string in mode {generate_mode}\nData: {line}")
+                            raise Exception(f"Unexpected string in mode {generate_mode}\nData: {line}")
                         if printing:
                             send_to_sd(data)
                         return
@@ -235,6 +248,7 @@ class DeepSeekChat:
                             raise Exception(f"Cannot parse dict {json.dumps(data,separators=(',',':'))}\nData: {line}")
                     else:
                         raise Exception(f"Unrecognizable type {type(data)}\nData: {line}")
+                        
                 send_to_sd('\n')
                 for line in response.iter_lines(decode_unicode=True):
                     if line and len(line)>0:
@@ -260,6 +274,7 @@ class DeepSeekChat:
                                 raise Exception(f"Unrecognizable line: {line}\nData: {line}")
                         else:
                             raise Exception(f"Unexpected response consisting of {type(line)}")
+                            
                 if printing:
                     print(f"\nFinished generating... Thinking time: {thinktime} Total tokens: {tokencount} {'Title: '+title if len(title)>0 else ''}")
                 if msgid:
@@ -277,12 +292,35 @@ class DeepSeekChat:
                 if len(title)>0:
                     ret["title"]=title
                 return {"ok": True, "content": ret}
-            else:
-                print(f"HTTP ERROR: {response.status_code}\n{response.text}")
-                return None
-        except Exception as e:
-            print(backtrace())
-            return {"ok": False, "content": str(e)}
+                
+            except Exception as e:
+                # If we've already outputted some response tokens, don't retry to prevent stream corruption/duplicates
+                if 'respond' in locals() and (len(respond) > 0 or len(think) > 0):
+                    print(f"Error occurred during streaming generation, returning partial content. Error: {e}")
+                    ret = {}
+                    if thinking_enabled:
+                        ret["thinktime"] = thinktime
+                        ret["thought"] = think
+                    if search_enabled:
+                        ret["citation"] = citation
+                    ret["thinking_enabled"] = thinking_enabled
+                    ret["search_enabled"] = False
+                    ret["model_type"] = model_type
+                    ret["response"] = respond
+                    if len(title) > 0:
+                        ret["title"] = title
+                    return {"ok": True, "content": ret}
+                
+                last_error = e
+                print(f"Attempt {attempt}/{max_attempts} failed with error: {e}")
+                if attempt < max_attempts:
+                    import time
+                    time.sleep(attempt * 2)  # Exponential backoff
+                    # Force new session creation on retry
+                    self.chat_session_id = None
+                    self.parent_message_id = None
+                    
+        return {"ok": False, "content": str(last_error)}
 
     def delete_all_sessions(self):
         url = f"{self.base_url}/api/v0/chat_session/delete_all"
