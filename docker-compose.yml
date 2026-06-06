@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  api-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: deepseek-api-server
+    restart: unless-stopped
+    network_mode: "host"
+    environment:
+      - HOST=${HOST:-0.0.0.0}
+      - PORT=${PORT:-8000}
+      - DS_SESSION_ID=${DS_SESSION_ID}
+      - AUTHORIZATION_TOKEN=${AUTHORIZATION_TOKEN}
+    volumes:
+      - .:/app
+      - /app/.venv

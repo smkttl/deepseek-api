@@ -74,6 +74,26 @@ python server.py --host 0.0.0.0 --port 8000
 uv run python server.py --host 0.0.0.0 --port 8000
 ```
 
+#### Running with Docker & Docker Compose:
+To run using Docker, first copy the example environment file:
+```bash
+cp .env.example .env
+```
+And customize `DS_SESSION_ID` and `AUTHORIZATION_TOKEN`. Then build and start the service:
+```bash
+docker compose up -d
+```
+Check running logs:
+```bash
+docker compose logs -f
+```
+Stop the service:
+```bash
+docker compose down
+```
+The compose config mounts a bind volume to `/app` for instant code changes, while isolating the `.venv` directory to prevent OS-level virtual environment conflicts.
+
+
 Then use it with any OpenAI-compatible client:
 
 ```bash
