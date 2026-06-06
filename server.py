@@ -70,7 +70,11 @@ def get_tokens():
         return ds_session_id, authorization_token
     raise ValueError("Tokens not found. Set DS_SESSION_ID and AUTHORIZATION_TOKEN or create 'tokens' file.")
 
-DS_SESSION_ID, AUTHORIZATION_TOKEN = get_tokens()
+try:
+    DS_SESSION_ID, AUTHORIZATION_TOKEN = get_tokens()
+except Exception as e:
+    print(f"Warning: {e}")
+    DS_SESSION_ID, AUTHORIZATION_TOKEN = None, None
 
 def get_model_config(model: str):
     """Map OpenAI-compatible model names to DeepSeek web model flags."""
@@ -285,6 +289,9 @@ def extract_prompt(messages, tools=None):
 
 def chat_non_streaming(messages, model_type="default", thinking_enabled=True, tools=None):
     """Non-streaming chat"""
+    if not DS_SESSION_ID or not AUTHORIZATION_TOKEN:
+        raise ValueError("Tokens not initialized. Ensure DS_SESSION_ID and AUTHORIZATION_TOKEN are set correctly.")
+
     chat_session_id, parent_message_id = lookup_session(messages)
     chat = DeepSeekChat(DS_SESSION_ID, AUTHORIZATION_TOKEN)
     
@@ -358,14 +365,14 @@ def chat_non_streaming(messages, model_type="default", thinking_enabled=True, to
             }
     else:
         error_msg = res.get("content") if res else "Unknown error"
-        return {
-            "content": f"Error: {error_msg}",
-            "tool_calls": None,
-            "finish_reason": "error"
-        }
+        raise ValueError(error_msg)
 
 def chat_streaming(messages, model_type="default", thinking_enabled=True, tools=None):
-    """Streaming chat using SSE and thread-safe queue"""
+    """Streaming generator yielding structured dictionaries for modular parsing"""
+    if not DS_SESSION_ID or not AUTHORIZATION_TOKEN:
+        yield {"type": "error", "error": "Tokens not initialized. Ensure DS_SESSION_ID and AUTHORIZATION_TOKEN are set correctly."}
+        return
+
     chat_session_id, parent_message_id = lookup_session(messages)
     chat = DeepSeekChat(DS_SESSION_ID, AUTHORIZATION_TOKEN)
     
@@ -397,9 +404,9 @@ def chat_streaming(messages, model_type="default", thinking_enabled=True, tools=
                     res = chat.send_message(fallback_prompt, printing=on_token, thinking_enabled=thinking_enabled, search_enabled=False, model_type=model_type)
                     if not res or not res.get("ok"):
                         error_msg = res.get("content") if res else "Unknown error"
-                        q.put(("error", f"Error: {error_msg}"))
+                        q.put(("error", error_msg))
                 else:
-                    q.put(("error", f"Error: {error_msg}"))
+                    q.put(("error", error_msg))
         except Exception as e:
             q.put(("error", str(e)))
         finally:
@@ -426,32 +433,24 @@ def chat_streaming(messages, model_type="default", thinking_enabled=True, tools=
             
         mode, text = item
         if mode == "error":
-            data_str = json.dumps({'choices': [{'delta': {'content': f"\n[Error: {text}]"}}]})
-            yield "data: " + data_str + "\n\n"
+            yield {"type": "error", "error": text}
             break
         elif mode == "THINK":
-            data_str = json.dumps({'choices': [{'delta': {'reasoning_content': text}}]})
-            yield "data: " + data_str + "\n\n"
+            yield {"type": "think", "text": text}
         elif mode == "RESPONSE":
             if parser:
                 normal_delta, tool_delta, finish_reason = parser.feed(text)
                 if normal_delta:
                     accumulated_content += normal_delta
-                    data_str = json.dumps({'choices': [{'delta': {'content': normal_delta}}]})
-                    yield "data: " + data_str + "\n\n"
+                    yield {"type": "content", "text": normal_delta}
                 if tool_delta:
-                    data_str = json.dumps({'choices': [{'delta': {'tool_calls': tool_delta}}]})
-                    yield "data: " + data_str + "\n\n"
+                    yield {"type": "tool_calls", "calls": tool_delta}
                 if finish_reason:
-                    data_str = json.dumps({'choices': [{'delta': {}, 'finish_reason': finish_reason}]})
-                    yield "data: " + data_str + "\n\n"
+                    yield {"type": "finish_reason", "reason": finish_reason}
             else:
                 accumulated_content += text
-                data_str = json.dumps({'choices': [{'delta': {'content': text}}]})
-                yield "data: " + data_str + "\n\n"
+                yield {"type": "content", "text": text}
                 
-    yield "data: [DONE]\n\n"
-    
     if final_session_id and final_parent_id:
         if parser and parser.done:
             tool_calls = [{
@@ -466,6 +465,23 @@ def chat_streaming(messages, model_type="default", thinking_enabled=True, tools=
         else:
             save_session(messages, accumulated_content, final_session_id, final_parent_id)
 
+def format_chunk(item):
+    if item["type"] == "think":
+        data_str = json.dumps({'choices': [{'delta': {'reasoning_content': item["text"]}}]})
+        yield "data: " + data_str + "\n\n"
+    elif item["type"] == "content":
+        data_str = json.dumps({'choices': [{'delta': {'content': item["text"]}}]})
+        yield "data: " + data_str + "\n\n"
+    elif item["type"] == "tool_calls":
+        data_str = json.dumps({'choices': [{'delta': {'tool_calls': item["calls"]}}]})
+        yield "data: " + data_str + "\n\n"
+    elif item["type"] == "finish_reason":
+        data_str = json.dumps({'choices': [{'delta': {}, 'finish_reason': item["reason"]}]})
+        yield "data: " + data_str + "\n\n"
+    elif item["type"] == "error":
+        data_str = json.dumps({'choices': [{'delta': {'content': f"\n[Error: {item['error']}]"}}]})
+        yield "data: " + data_str + "\n\n"
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     try:
@@ -476,31 +492,133 @@ async def index():
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    data = await request.json()
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({
+            "error": {
+                "message": "Malformed JSON request body.",
+                "type": "invalid_request_error",
+                "param": None,
+                "code": "bad_request"
+            }
+        }, status_code=400)
     
     messages = data.get("messages", [])
     stream = data.get("stream", False)
     tools = data.get("tools")
-    
-    # Determine model - default to DeepSeek V3.
     model = data.get("model", "deepseek-v3")
+    
+    # 100% OpenAI input parameter validations
+    if not isinstance(messages, list):
+        return JSONResponse({
+            "error": {
+                "message": "'messages' must be a list of objects.",
+                "type": "invalid_request_error",
+                "param": "messages",
+                "code": "invalid_value"
+            }
+        }, status_code=400)
+        
+    if not messages:
+        return JSONResponse({
+            "error": {
+                "message": "'messages' must not be empty.",
+                "type": "invalid_request_error",
+                "param": "messages",
+                "code": "empty_value"
+            }
+        }, status_code=400)
+        
+    # Check for authorization tokens
+    if not DS_SESSION_ID or not AUTHORIZATION_TOKEN:
+        return JSONResponse({
+            "error": {
+                "message": "DeepSeek API Credentials are not configured. Ensure a 'tokens' file is present or DS_SESSION_ID/AUTHORIZATION_TOKEN env variables are set.",
+                "type": "authentication_error",
+                "param": None,
+                "code": "invalid_api_key"
+            }
+        }, status_code=401)
     
     # Determine DeepSeek web model flags based on model name.
     model_type, thinking_enabled = get_model_config(model)
     
     if stream:
-        return StreamingResponse(
-            chat_streaming(messages, model_type, thinking_enabled, tools),
-            media_type='text/event-stream',
-            headers={
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive',
-            }
-        )
+        try:
+            gen = chat_streaming(messages, model_type, thinking_enabled, tools)
+            try:
+                first_item = next(gen)
+            except StopIteration:
+                first_item = None
+                
+            if first_item and first_item["type"] == "error":
+                error_msg = first_item["error"]
+                status_code = 500
+                error_type = "api_error"
+                if "token" in error_msg.lower() or "auth" in error_msg.lower():
+                    status_code = 401
+                    error_type = "authentication_error"
+                elif "rate limit" in error_msg.lower() or "429" in error_msg.lower():
+                    status_code = 429
+                    error_type = "rate_limit_error"
+                return JSONResponse({
+                    "error": {
+                        "message": error_msg,
+                        "type": error_type,
+                        "param": None,
+                        "code": None
+                    }
+                }, status_code=status_code)
+                
+            def sse_formatter(first, g):
+                if first:
+                    for chunk in format_chunk(first):
+                        yield chunk
+                for item in g:
+                    for chunk in format_chunk(item):
+                        yield chunk
+                yield "data: [DONE]\n\n"
+                
+            return StreamingResponse(
+                sse_formatter(first_item, gen),
+                media_type='text/event-stream',
+                headers={
+                    'Cache-Control': 'no-cache',
+                    'Connection': 'keep-alive',
+                }
+            )
+        except Exception as e:
+            return JSONResponse({
+                "error": {
+                    "message": str(e),
+                    "type": "api_error",
+                    "param": None,
+                    "code": None
+                }
+            }, status_code=500)
     else:
-        # Run chat_non_streaming in threadpool to avoid blocking main event loop
-        result = await run_in_threadpool(chat_non_streaming, messages, model_type, thinking_enabled, tools)
-        
+        try:
+            result = await run_in_threadpool(chat_non_streaming, messages, model_type, thinking_enabled, tools)
+        except ValueError as e:
+            error_msg = str(e)
+            status_code = 500
+            error_type = "api_error"
+            if "token" in error_msg.lower() or "auth" in error_msg.lower():
+                status_code = 401
+                error_type = "authentication_error"
+            elif "rate limit" in error_msg.lower() or "429" in error_msg.lower():
+                status_code = 429
+                error_type = "rate_limit_error"
+            return JSONResponse({
+                "error": {
+                    "message": error_msg,
+                    "type": error_type,
+                    "param": None,
+                    "code": None
+                }
+            }, status_code=status_code)
+            
         message_dict = {
             "role": "assistant",
             "content": result.get("content")

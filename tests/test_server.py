@@ -270,6 +270,49 @@ class TestDeepSeekServer(unittest.TestCase):
         
         self.assertIn("green", content2.lower())
 
+    def test_invalid_messages_parameter(self):
+        """Test POST /v1/chat/completions with invalid messages type (not a list)"""
+        payload = {
+            "model": "deepseek-v3",
+            "messages": "This is a string, not a list",
+            "stream": False
+        }
+        response = self.client.post("/v1/chat/completions", json=payload)
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["type"], "invalid_request_error")
+        self.assertEqual(data["error"]["param"], "messages")
+        self.assertEqual(data["error"]["code"], "invalid_value")
+
+    def test_empty_messages_parameter(self):
+        """Test POST /v1/chat/completions with empty messages list"""
+        payload = {
+            "model": "deepseek-v3",
+            "messages": [],
+            "stream": False
+        }
+        response = self.client.post("/v1/chat/completions", json=payload)
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["type"], "invalid_request_error")
+        self.assertEqual(data["error"]["param"], "messages")
+        self.assertEqual(data["error"]["code"], "empty_value")
+
+    def test_malformed_json_request(self):
+        """Test POST /v1/chat/completions with malformed JSON request body"""
+        response = self.client.post(
+            "/v1/chat/completions",
+            content="invalid raw string body",
+            headers={"Content-Type": "application/json"}
+        )
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["type"], "invalid_request_error")
+        self.assertEqual(data["error"]["code"], "bad_request")
+
     def tearDown(self):
         import time
         time.sleep(6)
