@@ -46,15 +46,23 @@ def save_session(messages, response_content, chat_session_id, parent_message_id,
 
 # Load tokens from file or environment
 def get_tokens():
+    ds_session_id = os.environ.get("DS_SESSION_ID")
+    authorization_token = os.environ.get("AUTHORIZATION_TOKEN")
+    
+    # Ignore default placeholder values and use valid env vars if present
+    if ds_session_id and authorization_token:
+        if "your_session_id_here" not in ds_session_id and "your_auth_token_here" not in authorization_token:
+            return ds_session_id, authorization_token
+
     if os.path.exists("tokens"):
         with open("tokens") as f:
             lines = f.read().strip().split('\n')
             if len(lines) >= 2:
                 return lines[0], lines[1]
-    ds_session_id = os.environ.get("DS_SESSION_ID")
-    authorization_token = os.environ.get("AUTHORIZATION_TOKEN")
+
     if ds_session_id and authorization_token:
         return ds_session_id, authorization_token
+
     raise ValueError("Tokens not found. Set DS_SESSION_ID and AUTHORIZATION_TOKEN or create 'tokens' file.")
 
 try:
