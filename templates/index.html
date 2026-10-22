@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -430,12 +430,12 @@
     DeepSeek API
   </div>
   <div class="header-actions">
-    <span id="statusIndicator" class="status-dot" title="未连接"></span>
-    <button class="btn btn-secondary" id="clearBtn" title="清空对话">
+    <span id="statusIndicator" class="status-dot" title="Disconnected"></span>
+    <button class="btn btn-secondary" id="clearBtn" title="Clear conversation">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/>
       </svg>
-      清空
+      Clear
     </button>
   </div>
 </header>
@@ -445,30 +445,30 @@
 
   <!-- Sidebar / Settings -->
   <aside class="sidebar" id="sidebar">
-    <h2>设置</h2>
+    <h2>Settings</h2>
 
     <div>
       <label class="field-label" for="sessionId">DS Session ID</label>
-      <input type="password" id="sessionId" placeholder="粘贴 ds_session_id …" />
+      <input type="password" id="sessionId" placeholder="Paste ds_session_id ..." />
     </div>
 
     <div>
       <label class="field-label" for="authToken">Authorization Token</label>
-      <input type="password" id="authToken" placeholder="粘贴 Bearer token …" />
+      <input type="password" id="authToken" placeholder="Paste Bearer token ..." />
     </div>
 
     <div>
-      <label class="field-label" for="modelSelect">模型</label>
+      <label class="field-label" for="modelSelect">Model</label>
       <select id="modelSelect">
         <option value="deepseek-v3">deepseek-v3</option>
-        <option value="deepseek-r1">deepseek-r1（思考模式）</option>
-        <option value="deepseek-v4">deepseek-v4（专家）</option>
-        <option value="deepseek-r4">deepseek-r4（专家思考）</option>
+        <option value="deepseek-r1">deepseek-r1 (Thinking Mode)</option>
+        <option value="deepseek-v4">deepseek-v4 (Expert)</option>
+        <option value="deepseek-r4">deepseek-r4 (Expert Thinking)</option>
       </select>
     </div>
 
     <div class="toggle-row">
-      <span>联网搜索</span>
+      <span>Web Search</span>
       <label class="toggle">
         <input type="checkbox" id="searchToggle" disabled />
         <span class="slider"></span>
@@ -476,14 +476,14 @@
     </div>
 
     <div class="action-row">
-      <button class="btn btn-primary" id="saveBtn">保存</button>
-      <button class="btn btn-danger"  id="resetBtn">重置</button>
+      <button class="btn btn-primary" id="saveBtn">Save</button>
+      <button class="btn btn-danger"  id="resetBtn">Reset</button>
     </div>
 
     <div style="font-size:12px; color:var(--muted); line-height:1.6;">
-      获取凭证：打开 <a href="https://chat.deepseek.com" target="_blank" style="color:var(--accent)">chat.deepseek.com</a>，
-      打开 DevTools → Application → Cookies，复制 <code>ds_session_id</code>；
-      在 Network 标签页中找到任意 API 请求，复制 <code>Authorization</code> 请求头的值（包含 Bearer 前缀）。
+      Get credentials: Open <a href="https://chat.deepseek.com" target="_blank" style="color:var(--accent)">chat.deepseek.com</a>,
+      open DevTools → Application → Cookies, copy <code>ds_session_id</code>;
+      find any API request in the Network tab and copy the <code>Authorization</code> request header value (including the Bearer prefix).
     </div>
   </aside>
 
@@ -494,15 +494,15 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
         </svg>
-        <h3>开始聊天</h3>
-        <p>在左侧填写凭证，然后在下方输入消息。</p>
+        <h3>Start Chatting</h3>
+        <p>Enter your credentials on the left, then type a message below.</p>
       </div>
     </div>
 
     <div class="input-area">
       <div class="input-row">
-        <textarea id="userInput" rows="1" placeholder="输入消息… (Shift+Enter 换行，Enter 发送)"></textarea>
-        <button class="send-btn" id="sendBtn" title="发送">
+        <textarea id="userInput" rows="1" placeholder="Type a message... (Shift+Enter for new line, Enter to send)"></textarea>
+        <button class="send-btn" id="sendBtn" title="Send">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
           </svg>
@@ -593,7 +593,7 @@
       search:    searchToggle.checked,
     }));
     updateStatus();
-    showToast('设置已保存', false);
+    showToast('Settings saved', false);
   }
 
   function resetSettings() {
@@ -603,13 +603,13 @@
     modelSelect.value = 'deepseek-v3';
     searchToggle.checked = false;
     updateStatus();
-    showToast('设置已重置', false);
+    showToast('Settings reset', false);
   }
 
   function updateStatus() {
     const ok = sessionIdEl.value.trim() && authTokenEl.value.trim();
     statusDot.className = 'status-dot' + (ok ? ' ok' : '');
-    statusDot.title = ok ? '凭证已配置' : '未配置凭证';
+    statusDot.title = ok ? 'Credentials configured' : 'Credentials not configured';
   }
 
   // ── Toast ─────────────────────────────────────────────────────────────
@@ -645,7 +645,7 @@
     const div = document.createElement('div');
     div.className = 'msg user';
     div.innerHTML = `
-      <div class="avatar user-av">你</div>
+      <div class="avatar user-av">You</div>
       <div class="bubble">${escapeHtml(text).replace(/\n/g,'<br>')}</div>
     `;
     messagesEl.appendChild(div);
@@ -685,7 +685,7 @@
       html += `
         <div class="think-block">
           <div class="think-header" onclick="toggleThink('${uid}')">
-            <span>💭 思考过程</span>
+            <span>💭 Thinking Process</span>
             <span id="arrow-${uid}">▶</span>
           </div>
           <div class="think-body" id="${uid}">${renderMarkdown(thinkContent)}</div>
@@ -719,7 +719,7 @@
 
     const settings = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
     if (!settings.sessionId || !settings.authToken) {
-      showToast('请先在左侧填写并保存凭证', true);
+      showToast('Please fill in and save your credentials on the left', true);
       return;
     }
 
@@ -757,7 +757,7 @@
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
         const msg = (err.error && err.error.message) || `HTTP ${resp.status}`;
-        updateAiMessage(aiMsgId, `⚠️ 错误：${msg}`);
+        updateAiMessage(aiMsgId, `⚠️ Error: ${msg}`);
         sessionHistory.pop(); // remove last user message
         showToast(msg, true);
         return;
@@ -797,7 +797,7 @@
       sessionHistory.push({ role: 'assistant', content: accumulated });
 
     } catch (err) {
-      updateAiMessage(aiMsgId, `⚠️ 请求失败：${err.message}`);
+      updateAiMessage(aiMsgId, `⚠️ Request failed: ${err.message}`);
       sessionHistory.pop();
       showToast(err.message, true);
     } finally {
@@ -816,7 +816,7 @@
     messagesEl.innerHTML = '';
     messagesEl.appendChild(emptyState);
     emptyState.style.display = '';
-    showToast('对话已清空', false);
+    showToast('Conversation cleared', false);
   }
 
   // ── Event listeners ───────────────────────────────────────────────────
