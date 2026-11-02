@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 '''
-DeepSeek API Server - OpenAI-compatible server for DeepSeek
+DeepSeek API Server - OpenAI-compatible server for DeepSeek.Programed to respond in only JSON.
 '''
 
 import os
@@ -150,7 +150,7 @@ def chat_completions():
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": result
+                    "content": (result[-1]+result) 
                 },
                 "finish_reason": "stop"
             }],
